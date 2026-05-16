@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import UploadReport from './pages/UploadReport'
@@ -7,57 +6,60 @@ import Disputes from './pages/Disputes'
 import DisputeDetail from './pages/DisputeDetail'
 import UserProfile from './pages/UserProfile'
 
-const NavItem = ({ to, children }) => (
-  <NavLink
-    to={to}
-    style={({ isActive }) => ({
-      display: 'block',
-      padding: '8px 16px',
-      borderRadius: '6px',
-      color: isActive ? '#6366f1' : '#94a3b8',
-      background: isActive ? 'rgba(99,102,241,0.1)' : 'transparent',
-      fontWeight: isActive ? 600 : 400,
-      transition: 'all 0.15s',
-      fontSize: '14px',
-    })}
-  >
-    {children}
-  </NavLink>
-)
+const NAV = [
+  { to: '/', icon: '⚡', label: 'Command Center', exact: true },
+  { to: '/upload', icon: '📄', label: 'Upload Report' },
+  { to: '/disputes', icon: '⚔️', label: 'Disputes' },
+  { to: '/profile', icon: '👤', label: 'My Profile' },
+]
 
 export default function App() {
   return (
     <BrowserRouter>
-      <div style={{ display: 'flex', minHeight: '100vh' }}>
-        {/* Sidebar */}
-        <nav style={{
-          width: 220,
-          background: '#111118',
-          borderRight: '1px solid #2a2a3a',
-          padding: '24px 12px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 4,
-          flexShrink: 0,
-        }}>
-          <div style={{ padding: '0 4px 20px', borderBottom: '1px solid #2a2a3a', marginBottom: 12 }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: '#6366f1' }}>⚡ Credit Sniper</div>
-            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Autonomous Dispute Agent</div>
+      <div className="layout">
+        <nav className="sidebar">
+          <div className="sidebar-logo">
+            <div className="logo-mark">⚡</div>
+            <div className="logo-name">Credit Sniper</div>
+            <div className="logo-tagline">Autonomous Dispute Agent</div>
           </div>
 
-          <NavItem to="/">Dashboard</NavItem>
-          <NavItem to="/upload">Upload Report</NavItem>
-          <NavItem to="/disputes">Disputes</NavItem>
-          <NavItem to="/profile">My Profile</NavItem>
+          <div className="sidebar-nav">
+            <div className="nav-section-label">Navigation</div>
+            {NAV.map(item => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.exact}
+                className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+              >
+                <span className="nav-icon">{item.icon}</span>
+                {item.label}
+              </NavLink>
+            ))}
 
-          <div style={{ marginTop: 'auto', padding: '16px 4px 0', borderTop: '1px solid #2a2a3a' }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Phase 1 MVP</div>
-            <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>Analysis + Letter Gen</div>
+            <div className="nav-section-label" style={{ marginTop: 12 }}>Roadmap</div>
+            <div className="nav-item" style={{ opacity: 0.4, cursor: 'default', pointerEvents: 'none' }}>
+              <span className="nav-icon">🤖</span>
+              Auto-Submit
+              <span style={{ marginLeft: 'auto', fontSize: 10, color: '#475569' }}>Phase 2</span>
+            </div>
+            <div className="nav-item" style={{ opacity: 0.4, cursor: 'default', pointerEvents: 'none' }}>
+              <span className="nav-icon">📡</span>
+              Live Monitoring
+              <span style={{ marginLeft: 'auto', fontSize: 10, color: '#475569' }}>Phase 3</span>
+            </div>
+          </div>
+
+          <div className="sidebar-footer">
+            <div className="phase-pill">⚡ Phase 1 Active</div>
+            <div style={{ fontSize: 11, color: 'var(--text-4)', marginTop: 8, lineHeight: 1.5 }}>
+              Analysis · Letters · Tracking
+            </div>
           </div>
         </nav>
 
-        {/* Main content */}
-        <main style={{ flex: 1, overflow: 'auto' }}>
+        <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/upload" element={<UploadReport />} />
