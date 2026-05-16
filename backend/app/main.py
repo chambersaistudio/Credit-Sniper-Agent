@@ -50,6 +50,17 @@ async def health():
     return {"status": "ok", "version": "1.0.0", "phase": "MVP — Phase 1"}
 
 
+@app.post("/api/migrate")
+async def run_migrations():
+    """
+    Create all database tables. Call once after deploying to Vercel
+    (or whenever the schema changes) since the serverless lifespan hook
+    doesn't fire on Vercel. Idempotent — safe to call multiple times.
+    """
+    await create_tables()
+    return {"status": "ok", "message": "Tables created / verified"}
+
+
 @app.get("/api/dashboard/stats")
 async def dashboard_stats():
     """Quick stats for the dashboard — will be replaced with real DB queries."""
