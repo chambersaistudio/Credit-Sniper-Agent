@@ -7,13 +7,9 @@ import json
 import logging
 from typing import Any
 
-import anthropic
-
-from app.config import settings
+from app.services.ai import ModelTier, complete as ai_complete
 
 logger = logging.getLogger(__name__)
-
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 ANALYSIS_SYSTEM_PROMPT = """You are an expert credit analyst and FCRA attorney with deep knowledge of:
 - Fair Credit Reporting Act (FCRA), 15 U.S.C. § 1681 et seq.
@@ -150,19 +146,15 @@ def analyze_credit_report(parsed_data: dict[str, Any]) -> dict[str, Any]:
     if len(report_data_str) > 30000:
         report_data_str = report_data_str[:30000] + "\n... [truncated for length]"
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=8000,
+    result = ai_complete(
+        ModelTier.REASONING,
         system=ANALYSIS_SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": ANALYSIS_USER_PROMPT.format(report_data=report_data_str),
-            }
-        ],
+        prompt=ANALYSIS_USER_PROMPT.format(report_data=report_data_str),
+        max_tokens=8000,
+        task="analyze_credit_report",
     )
 
-    raw_response = response.content[0].text
+    raw_response = result.text
 
     # Strip markdown code fences if present
     raw_response = raw_response.strip()
@@ -210,13 +202,15 @@ Provide a JSON response with:
   "timing_notes": "<any specific timing considerations>"
 }}"""
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
+    result = ai_complete(
+        ModelTier.REASONING,
+        system="",
+        prompt=strategy_prompt,
         max_tokens=2000,
-        messages=[{"role": "user", "content": strategy_prompt}],
+        task="generate_dispute_strategy",
     )
 
-    raw = response.content[0].text.strip()
+    raw = result.text.strip()
     if raw.startswith("```"):
         raw = raw.split("```", 2)[1]
         if raw.startswith("json"):

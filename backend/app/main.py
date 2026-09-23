@@ -9,7 +9,7 @@ import os
 
 from app.config import settings
 from app.database import create_tables
-from app.api import reports, disputes, letters, users
+from app.api import reports, disputes, letters, users, canonical_accounts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ app.include_router(reports.router)
 app.include_router(disputes.router)
 app.include_router(letters.router)
 app.include_router(users.router)
+app.include_router(canonical_accounts.router)
 
 
 @app.get("/api/health")

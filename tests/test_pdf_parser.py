@@ -8,6 +8,7 @@ from app.services.pdf_parser import (
     _extract_credit_score,
     _extract_personal_info,
     _extract_report_date,
+    _extract_accounts_raw,
     _parse_account_block,
     _extract_inquiries_raw,
     check_7_year_rule,
@@ -119,3 +120,73 @@ def test_check_7_year_rule_invalid_date():
     # Should not raise — return False on parse error
     result = check_7_year_rule("not-a-date")
     assert result is False
+
+
+def test_extract_accounts_raw_keeps_creditor_with_its_account_number():
+    # "Creditor:" and "Account Number:" belong to the same record — they
+    # must not be split into two separate, incomplete account entries.
+    text = """
+ACCOUNTS
+
+Creditor: CAPITAL ONE BANK
+Account Number: XXXX-XXXX-XXXX-4521
+Account Status: Charged Off
+Balance: $3,450.00
+
+Creditor: MIDLAND CREDIT MANAGEMENT
+Account Number: XXXX-9988
+Account Status: Open Collection
+Balance: $890.00
+"""
+    accounts = _extract_accounts_raw(text)
+    assert len(accounts) == 2
+    names = {a.get("creditor_name") for a in accounts}
+    assert names == {"CAPITAL ONE BANK", "MIDLAND CREDIT MANAGEMENT"}
+    for account in accounts:
+        assert account.get("account_number") is not None
+        assert account.get("balance") is not None
+
+
+def test_extract_accounts_raw_excludes_inquiries_section():
+    text = """
+ACCOUNTS
+
+Creditor: CAPITAL ONE BANK
+Account Number: XXXX-4521
+Balance: $3,450.00
+
+INQUIRIES
+
+Creditor: CHASE BANK
+Inquiry Date: 01/2024
+"""
+    accounts = _extract_accounts_raw(text)
+    assert len(accounts) == 1
+    assert accounts[0]["creditor_name"] == "CAPITAL ONE BANK"
+
+
+def test_extract_inquiries_raw_matches_bare_inquiries_header():
+    text = """
+ACCOUNTS
+
+Creditor: CAPITAL ONE BANK
+Account Number: XXXX-4521
+
+INQUIRIES
+
+Chase Bank — Date: 03/15/2023
+"""
+    inquiries = _extract_inquiries_raw(text)
+    assert len(inquiries) == 1
+    assert "Chase" in inquiries[0]["creditor_name"]
+
+
+def test_extract_inquiries_raw_single_newline_separated_records():
+    # No blank line after the header and no blank line between records —
+    # every inquiry line still needs to be extracted, not just the first.
+    text = "ACCOUNTS\n\nCreditor: CAPITAL ONE BANK\n\nINQUIRIES\nChase Bank — Date: 01/15/2024\nCapital One — Date: 06/22/2022\n"
+    inquiries = _extract_inquiries_raw(text)
+    assert len(inquiries) == 2
+    names = {i["creditor_name"] for i in inquiries}
+    assert any("Chase" in n for n in names)
+    assert any("Capital" in n for n in names)

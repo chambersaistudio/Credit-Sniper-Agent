@@ -174,17 +174,25 @@ def _extract_accounts_raw(text: str) -> list[dict[str, Any]]:
     This is a best-effort structured extraction; the AI analysis engine
     will do deeper interpretation.
     """
+    accounts_text = _accounts_section_only(text)
+
+    # Prefer blank-line-separated records — the common convention, and it
+    # keeps a "Creditor:" line together with its "Account Number:"/status/
+    # balance lines in one block. Splitting on header keywords instead
+    # (the fallback below) treats "Account Number:" as its own record
+    # boundary, which fragments a single account into a creditor-only
+    # piece and a number-only piece with no way to reunite them.
+    account_blocks = re.split(r"\n\s*\n+", accounts_text)
+    if len(account_blocks) <= 1:
+        account_blocks = re.split(
+            r"(?=(?:Account\s+#|Creditor|Credit\s+Card|Mortgage|Auto\s+Loan|Student\s+Loan|Collection)\s*:)",
+            accounts_text,
+            flags=re.IGNORECASE,
+        )
+
     accounts = []
-
-    # Split on common account header patterns
-    account_blocks = re.split(
-        r"(?=(?:Account\s+#|Account\s+Number|Creditor|Credit\s+Card|Mortgage|Auto\s+Loan|Student\s+Loan|Collection)\s*:)",
-        text,
-        flags=re.IGNORECASE,
-    )
-
     for block in account_blocks:
-        if len(block.strip()) < 50:
+        if len(block.strip()) < 40:
             continue
 
         account = _parse_account_block(block)
@@ -196,6 +204,19 @@ def _extract_accounts_raw(text: str) -> list[dict[str, Any]]:
         return [{"raw_block": text, "extraction_method": "full_text_ai_parse"}]
 
     return accounts
+
+
+_INQUIRIES_HEADER = re.compile(
+    r"\b(?:hard\s+inquiries|credit\s+inquiries|inquiries\s+in\s+the\s+last[^\n]*|inquiries)\b",
+    re.IGNORECASE,
+)
+
+
+def _accounts_section_only(text: str) -> str:
+    """Cut the text off before an inquiries section, if one is present,
+    so inquiry entries never get parsed as accounts."""
+    match = _INQUIRIES_HEADER.search(text)
+    return text[: match.start()] if match else text
 
 
 def _parse_account_block(block: str) -> dict[str, Any]:
@@ -259,17 +280,23 @@ def _extract_inquiries_raw(text: str) -> list[dict[str, Any]]:
     """Extract credit inquiry records."""
     inquiries = []
 
-    inquiry_section = re.search(
-        r"(?:hard\s+inquiries|credit\s+inquiries|inquiries\s+in\s+the\s+last)(.+?)(?:accounts|public\s+records|\Z)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    if not inquiry_section:
+    header_match = _INQUIRIES_HEADER.search(text)
+    if not header_match:
         return []
 
-    section_text = inquiry_section.group(1)
-    inquiry_blocks = re.split(r"\n{2,}", section_text)
+    remainder = text[header_match.end():]
+    end_match = re.search(r"\b(?:accounts|public\s+records)\b", remainder, re.IGNORECASE)
+    section_text = remainder[: end_match.start()] if end_match else remainder
+    section_text = section_text.strip()
+
+    # Prefer blank-line-separated records; if that collapses everything
+    # into one block (each inquiry on its own single-newline-terminated
+    # line, a common format), fall back to one block per line — otherwise
+    # every inquiry after the first in that block would be silently
+    # dropped, and a leading blank line breaks the `^` anchor below.
+    inquiry_blocks = re.split(r"\n\s*\n+", section_text)
+    if len(inquiry_blocks) <= 1:
+        inquiry_blocks = section_text.split("\n")
 
     for block in inquiry_blocks:
         if len(block.strip()) < 20:
@@ -279,7 +306,7 @@ def _extract_inquiries_raw(text: str) -> list[dict[str, Any]]:
 
         name_match = re.search(r"^(.+?)(?:\n|date|\d{1,2}[/-])", block, re.IGNORECASE)
         if name_match:
-            inquiry["creditor_name"] = name_match.group(1).strip()
+            inquiry["creditor_name"] = name_match.group(1).strip(" \t-—–:")
 
         date_match = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+\s+\d{1,2},?\s+\d{4})", block)
         if date_match:

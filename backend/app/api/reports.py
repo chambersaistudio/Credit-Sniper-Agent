@@ -18,6 +18,11 @@ from app.config import settings
 from app.models.credit_report import CreditReport, CreditAccount, CreditInquiry
 from app.services.pdf_parser import parse_credit_report_pdf
 from app.services.analysis_engine import analyze_credit_report
+from app.services.account_matcher import (
+    match_account_to_existing,
+    normalize_creditor_name,
+    account_number_suffix,
+)
 from app.utils.default_user import get_or_create_default_user
 
 logger = logging.getLogger(__name__)
@@ -97,67 +102,113 @@ async def upload_credit_report(
     db.add(report)
     await db.flush()
 
-    # Run AI analysis
+    # AI analysis is a proposal that ANNOTATES the deterministically-parsed
+    # accounts below (is_disputable, violations, priority) — it never
+    # creates account records itself. If it fails, accounts still get
+    # stored with their real parsed fields; they just won't have
+    # disputability findings until analysis succeeds. This is what keeps
+    # "do not silently hallucinate missing fields" true even when the AI
+    # call errors out entirely.
     try:
         analysis = analyze_credit_report(parsed)
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
-        analysis = {"error": str(e), "disputable_accounts": [], "disputable_inquiries": [], "summary": {}}
+        analysis = {
+            "error": str(e),
+            "disputable_accounts": [],
+            "non_disputable_accounts": [],
+            "disputable_inquiries": [],
+            "summary": {},
+        }
 
-    # Store analyzed accounts
+    raw_accounts = parsed.get("accounts_raw", [])
+    parser_found_accounts = not (
+        len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
+    )
+
+    ai_disputable = analysis.get("disputable_accounts", [])
+    ai_non_disputable = analysis.get("non_disputable_accounts", [])
+
     disputable_count = 0
-    for item in analysis.get("disputable_accounts", []):
-        account = CreditAccount(
-            report_id=report.id,
-            bureau=detected_bureau,
-            creditor_name=item.get("creditor_name"),
-            account_number=item.get("account_number"),
-            is_disputable=True,
-            dispute_reasons=item.get("dispute_reasons", []),
-            metro2_violations=item.get("violations", []),
-            fcra_violations=[v for v in item.get("violations", []) if v.get("violation_type") == "fcra"],
-            priority_score=item.get("priority_score", 5),
-            raw_data=item,
-        )
-        db.add(account)
-        disputable_count += 1
+    if parser_found_accounts:
+        # Ground truth: one CreditAccount per block the regex parser
+        # actually found in the document, populated from its own fields.
+        for raw in raw_accounts:
+            finding, is_dispute = _match_ai_finding(raw, ai_disputable, ai_non_disputable)
+            violations = finding.get("violations", []) if finding else []
+            account = CreditAccount(
+                report_id=report.id,
+                bureau=detected_bureau,
+                creditor_name=raw.get("creditor_name"),
+                account_number=raw.get("account_number"),
+                account_type=raw.get("account_type"),
+                account_status=raw.get("account_status"),
+                balance=raw.get("balance"),
+                credit_limit=raw.get("credit_limit"),
+                date_opened=raw.get("date_opened"),
+                date_closed=raw.get("date_closed"),
+                date_of_first_delinquency=raw.get("date_of_first_delinquency"),
+                date_last_reported=raw.get("date_last_reported"),
+                is_disputable=is_dispute,
+                dispute_reasons=finding.get("dispute_reasons", []) if finding else [],
+                metro2_violations=violations,
+                fcra_violations=[v for v in violations if v.get("violation_type") == "fcra"],
+                priority_score=finding.get("priority_score", 0) if finding else 0,
+                raw_data={"parsed": raw, "ai_finding": finding},
+            )
+            db.add(account)
+            await db.flush()
+            await match_account_to_existing(db, resolved_user_id, account)
+            if is_dispute:
+                disputable_count += 1
+    else:
+        # The deterministic parser couldn't segment this document into
+        # per-account blocks at all — fall back to the AI's own account
+        # list as the only available source. Clearly marked as such in
+        # raw_data rather than presented as independently verified.
+        for item in ai_disputable:
+            account = _build_account_from_ai_item(report.id, detected_bureau, item, is_disputable=True)
+            db.add(account)
+            await db.flush()
+            await match_account_to_existing(db, resolved_user_id, account)
+            disputable_count += 1
+        for item in ai_non_disputable:
+            account = _build_account_from_ai_item(report.id, detected_bureau, item, is_disputable=False)
+            db.add(account)
+            await db.flush()
+            await match_account_to_existing(db, resolved_user_id, account)
 
-    for item in analysis.get("non_disputable_accounts", []):
-        account = CreditAccount(
-            report_id=report.id,
-            bureau=detected_bureau,
-            creditor_name=item.get("creditor_name"),
-            is_disputable=False,
-            raw_data=item,
-        )
-        db.add(account)
-
-    # Store inquiries
+    # Inquiries: same principle — the parser's raw_inquiries are ground
+    # truth, AI analysis only flags which ones lack permissible purpose.
+    ai_disputable_inquiries = analysis.get("disputable_inquiries", [])
     disputable_inquiry_count = 0
-    for inq in analysis.get("disputable_inquiries", []):
+    for raw_inq in parsed.get("inquiries_raw", []):
+        ai_match = _match_ai_inquiry(raw_inq, ai_disputable_inquiries)
         inquiry = CreditInquiry(
             report_id=report.id,
             bureau=detected_bureau,
-            creditor_name=inq.get("creditor_name"),
-            inquiry_date=inq.get("inquiry_date"),
-            inquiry_type="hard",
-            is_disputable=True,
-            dispute_reason=inq.get("dispute_reason"),
+            creditor_name=raw_inq.get("creditor_name"),
+            inquiry_date=raw_inq.get("inquiry_date"),
+            inquiry_type=raw_inq.get("inquiry_type", "hard"),
+            is_disputable=bool(ai_match),
+            dispute_reason=ai_match.get("dispute_reason") if ai_match else None,
         )
         db.add(inquiry)
-        disputable_inquiry_count += 1
+        if ai_match:
+            disputable_inquiry_count += 1
 
     await db.commit()
 
     summary = analysis.get("summary", {})
+    total_accounts = len(raw_accounts) if parser_found_accounts else len(ai_disputable) + len(ai_non_disputable)
     return {
         "report_id": str(report.id),
         "bureau": detected_bureau,
         "credit_score": parsed.get("credit_score"),
         "report_date": parsed.get("report_date"),
-        "total_accounts": summary.get("total_accounts", 0),
+        "total_accounts": total_accounts,
         "disputable_accounts": disputable_count,
-        "total_inquiries": summary.get("total_inquiries", 0),
+        "total_inquiries": len(parsed.get("inquiries_raw", [])),
         "disputable_inquiries": disputable_inquiry_count,
         "estimated_score_gain": summary.get("estimated_score_gain", 0),
         "overall_strategy": summary.get("overall_strategy", ""),
@@ -248,3 +299,67 @@ def _parse_date(date_str: str | None) -> datetime | None:
         return parser.parse(date_str).replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _match_ai_finding(
+    raw_account: dict[str, Any],
+    ai_disputable: list[dict[str, Any]],
+    ai_non_disputable: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool]:
+    """
+    Match a parser-extracted account block to the AI's finding for the
+    same account, if any. Matched by account number suffix first (most
+    reliable), falling back to normalized creditor name. Returns
+    (finding_or_None, is_disputable) — an unmatched account is treated as
+    not (yet) found disputable, never silently dropped.
+    """
+    raw_suffix = account_number_suffix(raw_account.get("account_number"))
+    raw_name = normalize_creditor_name(raw_account.get("creditor_name"))
+
+    for is_dispute, items in ((True, ai_disputable), (False, ai_non_disputable)):
+        for item in items:
+            item_suffix = account_number_suffix(item.get("account_number"))
+            if raw_suffix and item_suffix:
+                if raw_suffix == item_suffix:
+                    return item, is_dispute
+                continue
+            item_name = normalize_creditor_name(item.get("creditor_name"))
+            if raw_name and item_name and raw_name == item_name:
+                return item, is_dispute
+    return None, False
+
+
+def _match_ai_inquiry(
+    raw_inquiry: dict[str, Any], ai_disputable_inquiries: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    raw_name = normalize_creditor_name(raw_inquiry.get("creditor_name"))
+    for item in ai_disputable_inquiries:
+        item_name = normalize_creditor_name(item.get("creditor_name"))
+        if raw_name and item_name and raw_name == item_name:
+            return item
+    return None
+
+
+def _build_account_from_ai_item(
+    report_id: uuid.UUID, bureau: str, item: dict[str, Any], is_disputable: bool
+) -> CreditAccount:
+    """
+    Build a CreditAccount straight from the AI's output — only used when
+    the deterministic parser found no per-account structure to match
+    against, so there's no ground-truth alternative. Marked in raw_data
+    so it's traceable as AI-sourced rather than independently verified.
+    """
+    violations = item.get("violations", []) if is_disputable else []
+    return CreditAccount(
+        report_id=report_id,
+        bureau=bureau,
+        creditor_name=item.get("creditor_name"),
+        account_number=item.get("account_number"),
+        date_opened=item.get("date_opened"),
+        is_disputable=is_disputable,
+        dispute_reasons=item.get("dispute_reasons", []) if is_disputable else [],
+        metro2_violations=violations,
+        fcra_violations=[v for v in violations if v.get("violation_type") == "fcra"],
+        priority_score=item.get("priority_score", 0) if is_disputable else 0,
+        raw_data={"ai_item": item, "_source": "ai_fallback_parse"},
+    )

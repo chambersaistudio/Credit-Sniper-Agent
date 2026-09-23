@@ -8,13 +8,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import anthropic
-
-from app.config import settings
+from app.services.ai import ModelTier, complete as ai_complete
 
 logger = logging.getLogger(__name__)
-
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 LETTER_SYSTEM_PROMPT = """You are an expert credit dispute attorney specializing in FCRA litigation and Metro 2 compliance.
 
@@ -115,14 +111,15 @@ Return a JSON object:
   "certified_mail_recommended": <true|false>
 }}"""
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=6000,
+    result = ai_complete(
+        ModelTier.REASONING,
         system=LETTER_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        prompt=prompt,
+        max_tokens=6000,
+        task="generate_letter",
     )
 
-    raw = response.content[0].text.strip()
+    raw = result.text.strip()
     if raw.startswith("```"):
         raw = raw.split("```", 2)[1]
         if raw.startswith("json"):

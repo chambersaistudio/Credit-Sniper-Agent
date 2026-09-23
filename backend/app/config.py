@@ -24,6 +24,19 @@ DEFAULT_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:
 
 class Settings(BaseSettings):
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
+
+    # Per-tier AI routing overrides (ModelTier.FAST/REASONING/ESCALATION).
+    # Empty string means "use the hardcoded default for this tier" — see
+    # app/services/ai/provider.py. Lets ops repoint a tier at a different
+    # provider/model without a code change.
+    ai_fast_provider: str = ""
+    ai_fast_model: str = ""
+    ai_reasoning_provider: str = ""
+    ai_reasoning_model: str = ""
+    ai_escalation_provider: str = ""
+    ai_escalation_model: str = ""
+
     database_url: str = _default_db_url()
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "dev-secret-key-change-in-production"
