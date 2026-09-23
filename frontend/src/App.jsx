@@ -1,75 +1,76 @@
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import Dashboard from './pages/Dashboard'
+import { useEffect, useState } from 'react'
+import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { api } from './api'
+import Home from './pages/Home'
+import Reports from './pages/Reports'
 import UploadReport from './pages/UploadReport'
 import ReportDetail from './pages/ReportDetail'
-import Disputes from './pages/Disputes'
-import DisputeDetail from './pages/DisputeDetail'
-import UserProfile from './pages/UserProfile'
+import AccountDetail from './pages/AccountDetail'
+import Cases from './pages/Cases'
+import CaseDetail from './pages/CaseDetail'
+import Activity from './pages/Activity'
+import Profile from './pages/Profile'
 
 const NAV = [
-  { to: '/', icon: '⚡', label: 'Command Center', exact: true },
-  { to: '/upload', icon: '📄', label: 'Upload Report' },
-  { to: '/disputes', icon: '⚔️', label: 'Disputes' },
-  { to: '/profile', icon: '👤', label: 'My Profile' },
+  { to: '/', icon: '⌂', label: 'Home', end: true },
+  { to: '/reports', icon: '▤', label: 'Reports' },
+  { to: '/cases', icon: '⚖', label: 'Cases', badge: true },
+  { to: '/activity', icon: '◷', label: 'Activity' },
+  { to: '/profile', icon: '◉', label: 'Profile' },
 ]
+
+function Shell() {
+  const location = useLocation()
+  const [needsYou, setNeedsYou] = useState(0)
+
+  useEffect(() => {
+    window.scrollTo(0, 0)
+    api.dashboard().then(d => setNeedsYou(d.cases.needs_user)).catch(() => {})
+  }, [location.pathname])
+
+  return (
+    <div className="app">
+      <nav className="sidebar" aria-label="Main">
+        <div className="brand">Credit Sniper<small>Credit intelligence</small></div>
+        {NAV.map(item => (
+          <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => `side-link${isActive ? ' active' : ''}`}>
+            <span aria-hidden>{item.icon}</span>{item.label}
+            {item.badge && needsYou > 0 && <span className="dot">{needsYou}</span>}
+          </NavLink>
+        ))}
+      </nav>
+
+      <div className="main">
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/reports" element={<Reports />} />
+          <Route path="/reports/upload" element={<UploadReport />} />
+          <Route path="/reports/:id" element={<ReportDetail />} />
+          <Route path="/accounts/:id" element={<AccountDetail />} />
+          <Route path="/cases" element={<Cases />} />
+          <Route path="/cases/:id" element={<CaseDetail />} />
+          <Route path="/activity" element={<Activity />} />
+          <Route path="/profile" element={<Profile />} />
+        </Routes>
+      </div>
+
+      <nav className="tabbar" aria-label="Main">
+        {NAV.map(item => (
+          <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => `tab${isActive ? ' active' : ''}`}>
+            <span className="tab-icon" aria-hidden>{item.icon}</span>
+            {item.label}
+            {item.badge && needsYou > 0 && <span className="dot">{needsYou}</span>}
+          </NavLink>
+        ))}
+      </nav>
+    </div>
+  )
+}
 
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="layout">
-        <nav className="sidebar">
-          <div className="sidebar-logo">
-            <div className="logo-mark">⚡</div>
-            <div className="logo-name">Credit Sniper</div>
-            <div className="logo-tagline">Autonomous Dispute Agent</div>
-          </div>
-
-          <div className="sidebar-nav">
-            <div className="nav-section-label">Navigation</div>
-            {NAV.map(item => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.exact}
-                className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
-              >
-                <span className="nav-icon">{item.icon}</span>
-                {item.label}
-              </NavLink>
-            ))}
-
-            <div className="nav-section-label" style={{ marginTop: 12 }}>Roadmap</div>
-            <div className="nav-item" style={{ opacity: 0.4, cursor: 'default', pointerEvents: 'none' }}>
-              <span className="nav-icon">🤖</span>
-              Auto-Submit
-              <span style={{ marginLeft: 'auto', fontSize: 10, color: '#475569' }}>Phase 2</span>
-            </div>
-            <div className="nav-item" style={{ opacity: 0.4, cursor: 'default', pointerEvents: 'none' }}>
-              <span className="nav-icon">📡</span>
-              Live Monitoring
-              <span style={{ marginLeft: 'auto', fontSize: 10, color: '#475569' }}>Phase 3</span>
-            </div>
-          </div>
-
-          <div className="sidebar-footer">
-            <div className="phase-pill">⚡ Phase 1 Active</div>
-            <div style={{ fontSize: 11, color: 'var(--text-4)', marginTop: 8, lineHeight: 1.5 }}>
-              Analysis · Letters · Tracking
-            </div>
-          </div>
-        </nav>
-
-        <main className="main-content">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/upload" element={<UploadReport />} />
-            <Route path="/reports/:id" element={<ReportDetail />} />
-            <Route path="/disputes" element={<Disputes />} />
-            <Route path="/disputes/:id" element={<DisputeDetail />} />
-            <Route path="/profile" element={<UserProfile />} />
-          </Routes>
-        </main>
-      </div>
+      <Shell />
     </BrowserRouter>
   )
 }

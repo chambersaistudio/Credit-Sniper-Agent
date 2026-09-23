@@ -1,49 +1,55 @@
 const BASE = '/api'
 
-async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  })
+async function request(path, { method = 'GET', body, form } = {}) {
+  const init = { method, headers: {} }
+  if (form) {
+    init.body = form
+  } else if (body !== undefined) {
+    init.headers['Content-Type'] = 'application/json'
+    init.body = JSON.stringify(body)
+  }
+  const res = await fetch(`${BASE}${path}`, init)
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || `HTTP ${res.status}`)
+    const err = await res.json().catch(() => ({}))
+    const detail = Array.isArray(err.detail) ? err.detail.map(d => d.msg).join('; ') : err.detail
+    throw new Error(detail || `Request failed (${res.status})`)
   }
   return res.json()
 }
 
 export const api = {
-  // Reports
-  uploadReport: (formData) =>
-    fetch(`${BASE}/reports/upload`, { method: 'POST', body: formData }).then(r => {
-      if (!r.ok) return r.json().then(e => { throw new Error(e.detail || 'Upload failed') })
-      return r.json()
-    }),
+  dashboard: () => request('/dashboard'),
+  activity: () => request('/activity'),
 
-  getReport: (id) => request(`/reports/${id}`),
+  uploadReport: (file, bureau) => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('bureau', bureau)
+    return request('/reports/upload', { method: 'POST', form })
+  },
   listReports: () => request('/reports/'),
+  getReport: (id) => request(`/reports/${id}`),
 
-  // Disputes
-  createDispute: (data) => request('/disputes/', { method: 'POST', body: JSON.stringify(data) }),
-  listDisputes: () => request('/disputes/'),
-  getDispute: (id) => request(`/disputes/${id}`),
-  approveDispute: (id) => request(`/disputes/${id}/approve`, { method: 'POST', body: JSON.stringify({}) }),
-  submitDispute: (id) => request(`/disputes/${id}/submit`, { method: 'POST' }),
-  recordResponse: (id, data) => request(`/disputes/${id}/response`, { method: 'POST', body: JSON.stringify(data) }),
-  getPendingAction: () => request('/disputes/pending-action'),
+  listAccounts: () => request('/accounts/'),
+  getAccount: (id) => request(`/accounts/${id}`),
+  evaluateAccount: (id) => request(`/accounts/${id}/evaluate`, { method: 'POST' }),
 
-  // Letters
-  getLetter: (id) => request(`/letters/${id}`),
-  regenerateLetter: (id, data) => request(`/letters/${id}/regenerate`, { method: 'POST', body: JSON.stringify(data) }),
-  createFurnisherLetter: (data) => request('/letters/furnisher', { method: 'POST', body: JSON.stringify(data) }),
-  listLetterTypes: () => request('/letters/types/list'),
+  listCases: () => request('/cases/'),
+  getCase: (id) => request(`/cases/${id}`),
+  openCase: (claimIds, recipient, furnisher = {}) =>
+    request('/cases/', {
+      method: 'POST',
+      body: { claim_ids: claimIds, recipient, furnisher_name: furnisher.name, furnisher_address: furnisher.address },
+    }),
+  setFurnisherAddress: (id, address) => request(`/cases/${id}/furnisher`, { method: 'PATCH', body: { furnisher_address: address } }),
+  generatePackage: (id) => request(`/cases/${id}/package`, { method: 'POST' }),
+  packagePdfUrl: (id) => `${BASE}/cases/${id}/package.pdf`,
+  approveCase: (id) => request(`/cases/${id}/approve`, { method: 'POST' }),
+  markSubmitted: (id, body) => request(`/cases/${id}/submitted`, { method: 'POST', body }),
+  markDelivered: (id, body) => request(`/cases/${id}/delivered`, { method: 'POST', body }),
+  recordResponse: (id, body) => request(`/cases/${id}/response`, { method: 'POST', body }),
+  moveCase: (id, target, detail = '') => request(`/cases/${id}/transition`, { method: 'POST', body: { target, detail } }),
 
-  // Users
-  createUser: (data) => request('/users/', { method: 'POST', body: JSON.stringify(data) }),
-  getUser: (id) => request(`/users/${id}`),
-  updateUser: (id, data) => request(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-
-  // Dashboard
-  getStats: () => request('/dashboard/stats'),
-  health: () => request('/health'),
+  getMe: () => request('/users/me'),
+  updateMe: (body) => request('/users/me', { method: 'PATCH', body }),
 }
