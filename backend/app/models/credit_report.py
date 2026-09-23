@@ -1,4 +1,9 @@
-from sqlalchemy import Column, String, DateTime, Float, Integer, Text, ForeignKey, Boolean, JSON
+"""
+Bureau-scoped report data, stored exactly as extracted from the document.
+No analysis or dispute judgment lives here — findings are computed from
+these rows (app/services/credit_profile.py) and disputes live in Cases.
+"""
+from sqlalchemy import Column, String, DateTime, Float, Integer, Text, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -11,14 +16,14 @@ class CreditReport(Base):
     __tablename__ = "credit_reports"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    bureau = Column(String, nullable=False)  # equifax | experian | transunion | tri_merge
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    bureau = Column(String, nullable=False)  # equifax | experian | transunion
     report_date = Column(DateTime(timezone=True))
     pull_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     source = Column(String, default="manual_upload")  # manual_upload | api_pull
     file_path = Column(String)
     raw_text = Column(Text)
-    parsed_data = Column(JSON)
+    parsed_data = Column(JSON)  # parse metadata (extraction method, personal info), not a copy of the text
     credit_score = Column(Integer)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -28,16 +33,21 @@ class CreditReport(Base):
 
 
 class CreditAccount(Base):
+    """One tradeline as one bureau reported it in one report. Unknown values stay NULL."""
+
     __tablename__ = "credit_accounts"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    report_id = Column(UUID(as_uuid=True), ForeignKey("credit_reports.id"), nullable=False)
+    report_id = Column(UUID(as_uuid=True), ForeignKey("credit_reports.id"), nullable=False, index=True)
     bureau = Column(String)
     creditor_name = Column(String)
-    account_number = Column(String)  # partial/masked
-    account_type = Column(String)    # revolving | installment | mortgage | collection | etc
-    account_status = Column(String)  # open | closed | charged_off | collection | etc
+    account_number = Column(String)  # as masked on the report
+    account_type = Column(String)
+    account_status = Column(String)  # normalized: open | closed | paid | charged_off | collection | ...
+    payment_status = Column(String)  # as worded on the report
     balance = Column(Float)
+    past_due_amount = Column(Float)
+    high_balance = Column(Float)
     credit_limit = Column(Float)
     original_amount = Column(Float)
     monthly_payment = Column(Float)
@@ -46,34 +56,25 @@ class CreditAccount(Base):
     date_last_active = Column(String)
     date_of_first_delinquency = Column(String)
     date_last_reported = Column(String)
-    payment_history = Column(JSON)   # month-by-month payment status
-    payment_status = Column(String)  # current | 30d | 60d | 90d | 120d | charged_off
+    date_last_payment = Column(String)
+    payment_history = Column(JSON)
     remarks = Column(Text)
+    # Source evidence: the report text block this record was read from.
     raw_data = Column(JSON)
-    # Analysis flags
-    is_disputable = Column(Boolean, default=False)
-    dispute_reasons = Column(JSON)   # list of identified issues
-    metro2_violations = Column(JSON) # specific Metro 2 field violations
-    fcra_violations = Column(JSON)   # specific FCRA violations
-    priority_score = Column(Integer, default=0)  # 1-10 priority
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     report = relationship("CreditReport", back_populates="accounts")
-    disputes = relationship("Dispute", back_populates="account")
 
 
 class CreditInquiry(Base):
     __tablename__ = "credit_inquiries"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    report_id = Column(UUID(as_uuid=True), ForeignKey("credit_reports.id"), nullable=False)
+    report_id = Column(UUID(as_uuid=True), ForeignKey("credit_reports.id"), nullable=False, index=True)
     bureau = Column(String)
     creditor_name = Column(String)
     inquiry_date = Column(String)
     inquiry_type = Column(String)  # hard | soft
-    is_authorized = Column(Boolean)
-    is_disputable = Column(Boolean, default=False)
-    dispute_reason = Column(String)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     report = relationship("CreditReport", back_populates="inquiries")

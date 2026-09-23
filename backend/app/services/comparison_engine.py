@@ -1,166 +1,163 @@
 """
 Cross-bureau comparison engine.
 
-Given the bureau-specific records linked to one CanonicalAccount, finds
-per-field discrepancies and classifies each with a rule-based first pass —
-no LLM call. "A difference between bureaus is NOT automatically an error
-or violation" (Phase 1.5 spec), so classification has four levels of
-increasing severity:
-
-  DIFFERENCE            — expected/benign (rounding, reporting-date lag)
-  POTENTIAL_INCONSISTENCY — worth a second look, not yet well-supported
-  LIKELY_INACCURACY      — a rule caught a real contradiction
-  SUPPORTED_DISPUTE_GROUND — strong, specific, well-documented basis
-
-Only findings the rules can't confidently classify should go to the
-reasoning engine (Stage 2) — this module never itself decides "yes,
-dispute this," it only surfaces and grades discrepancies.
+Given the bureau records linked to one CanonicalAccount, finds per-field
+discrepancies and grades them with deterministic rules — no LLM call.
+Only the reasoning engine decides whether a finding supports a dispute.
 """
-from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum
-from typing import Any
+from typing import Any, Callable
+
+from app.services.findings import (
+    CLOSED_STATUSES,
+    NEGATIVE_STATUSES,
+    OPEN_STATUSES,
+    Finding,
+    Severity,
+    normalize_status,
+    sort_by_severity,
+)
+from app.utils.dates import parse_report_date
+
+# Differences at or below this are rounding / reporting-cycle noise.
+BALANCE_TOLERANCE = 1.00
+# Bureaus commonly report the same event a few weeks apart.
+DATE_TOLERANCE_DAYS = 30
+# A DOFD gap beyond this materially moves the § 1681c reporting period.
+DOFD_MATERIAL_GAP_DAYS = 90
+OPEN_DATE_TOLERANCE_DAYS = 60
+
+# Statuses where the balance should no longer be moving month to month.
+TERMINAL_STATUSES = CLOSED_STATUSES | {"charged_off", "collection"}
 
 
-class Severity(str, Enum):
-    DIFFERENCE = "difference"
-    POTENTIAL_INCONSISTENCY = "potential_inconsistency"
-    LIKELY_INACCURACY = "likely_inaccuracy"
-    SUPPORTED_DISPUTE_GROUND = "supported_dispute_ground"
+def _values(records: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    return {r["bureau"]: r.get(field) for r in records if r.get(field) not in (None, "")}
 
 
-_SEVERITY_ORDER = {s: i for i, s in enumerate(Severity)}
-
-
-@dataclass
-class ComparisonFinding:
-    field: str
-    severity: Severity
-    values_by_bureau: dict[str, Any]
-    rationale: str
-
-
-_CLOSED_LIKE = {"closed", "paid", "paid in full", "transferred", "sold"}
-_NEGATIVE_TERMINAL = {"charged_off", "charge_off", "collection"}
-_OPEN_LIKE = {"open", "current"}
-
-
-def _normalize_status(value: str | None) -> str | None:
-    if not value:
-        return None
-    return value.strip().lower().replace(" ", "_")
-
-
-def _parse_date(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    for fmt in ("%m/%d/%Y", "%m/%Y", "%Y-%m-%d", "%Y-%m", "%m-%Y"):
-        try:
-            return datetime.strptime(value.strip(), fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def _compare_balance(records: list[dict[str, Any]]) -> ComparisonFinding | None:
-    values = {r["bureau"]: r.get("balance") for r in records if r.get("balance") is not None}
+def _compare_balance(records: list[dict[str, Any]]) -> Finding | None:
+    values = _values(records, "balance")
     if len(values) < 2:
         return None
-    amounts = list(values.values())
-    spread = max(amounts) - min(amounts)
+    spread = max(values.values()) - min(values.values())
     if spread == 0:
         return None
 
-    statuses = {_normalize_status(r.get("account_status")) for r in records}
-    all_terminal = statuses and statuses.issubset(_CLOSED_LIKE | _NEGATIVE_TERMINAL)
+    statuses = {normalize_status(r.get("account_status")) for r in records} - {None}
+    all_terminal = bool(statuses) and statuses <= TERMINAL_STATUSES
 
-    if spread <= 1.0:
-        severity = Severity.DIFFERENCE
-        rationale = "Balances differ by $1 or less — consistent with rounding."
+    if spread <= BALANCE_TOLERANCE:
+        severity, rationale = Severity.DIFFERENCE, "Balances differ by $1 or less — consistent with rounding."
     elif all_terminal:
         severity = Severity.LIKELY_INACCURACY
         rationale = (
-            "Balances differ by more than $1 across bureaus even though every "
-            "bureau reports the account as closed/charged-off/collection — a "
-            "closed account's balance shouldn't still be moving."
+            f"Balances differ by ${spread:,.2f} although every bureau reports the account as "
+            "closed, charged off, or in collection — a balance that is no longer changing should "
+            "not differ between bureaus."
         )
     else:
         severity = Severity.POTENTIAL_INCONSISTENCY
-        rationale = "Balances differ across bureaus; at least one account is still open, so this may reflect reporting-date timing."
-
-    return ComparisonFinding("balance", severity, values, rationale)
-
-
-def _compare_account_status(records: list[dict[str, Any]]) -> ComparisonFinding | None:
-    values = {r["bureau"]: r.get("account_status") for r in records if r.get("account_status")}
-    normalized = {b: _normalize_status(v) for b, v in values.items()}
-    if len(set(normalized.values())) < 2:
-        return None
-
-    statuses = set(normalized.values())
-    contradiction = (statuses & _OPEN_LIKE) and (statuses & (_CLOSED_LIKE | _NEGATIVE_TERMINAL))
-    severity = Severity.LIKELY_INACCURACY if contradiction else Severity.POTENTIAL_INCONSISTENCY
-    rationale = (
-        "One bureau reports this account open/current while another reports it closed, "
-        "charged-off, or in collection for the same tradeline."
-        if contradiction
-        else "Account status wording differs across bureaus without a clear open/closed contradiction."
-    )
-    return ComparisonFinding("account_status", severity, values, rationale)
-
-
-def _compare_dofd(records: list[dict[str, Any]]) -> ComparisonFinding | None:
-    values = {r["bureau"]: r.get("date_of_first_delinquency") for r in records if r.get("date_of_first_delinquency")}
-    if len(values) < 2:
-        return None
-    parsed = {b: _parse_date(v) for b, v in values.items()}
-    parsed = {b: d for b, d in parsed.items() if d is not None}
-    if len(parsed) < 2:
-        return None
-
-    dates = list(parsed.values())
-    max_gap_days = max((d1 - d2).days for d1 in dates for d2 in dates)
-
-    if max_gap_days <= 30:
-        return None
-    if max_gap_days > 90:
-        severity = Severity.SUPPORTED_DISPUTE_GROUND
         rationale = (
-            f"Date of First Delinquency differs by {max_gap_days} days across bureaus. "
-            "DOFD controls the FCRA 7-year reporting clock (15 U.S.C. § 1681c), so a gap "
-            "this large is a specific, well-documented basis for dispute, not just a difference."
+            f"Balances differ by ${spread:,.2f}. The account is still active on at least one bureau, "
+            "so this may be reporting-date timing; compare the date each bureau last updated it."
         )
-    else:
-        severity = Severity.POTENTIAL_INCONSISTENCY
-        rationale = f"Date of First Delinquency differs by {max_gap_days} days across bureaus."
-    return ComparisonFinding("date_of_first_delinquency", severity, values, rationale)
+    return Finding("cross_bureau.balance", "balance", severity, rationale, values)
 
 
-def _compare_payment_status(records: list[dict[str, Any]]) -> ComparisonFinding | None:
-    values = {r["bureau"]: r.get("payment_status") for r in records if r.get("payment_status")}
-    normalized = {b: _normalize_status(v) for b, v in values.items()}
-    if len(set(normalized.values())) < 2:
+def _compare_account_status(records: list[dict[str, Any]]) -> Finding | None:
+    values = _values(records, "account_status")
+    normalized = {normalize_status(v) for v in values.values()}
+    if len(normalized) < 2:
         return None
-    return ComparisonFinding(
-        "payment_status",
-        Severity.POTENTIAL_INCONSISTENCY,
+    contradiction = bool(normalized & OPEN_STATUSES) and bool(normalized & (CLOSED_STATUSES | NEGATIVE_STATUSES))
+    if contradiction:
+        return Finding(
+            "cross_bureau.account_status", "account_status", Severity.LIKELY_INACCURACY,
+            "One bureau reports this account open/current while another reports it closed, "
+            "charged off, or in collection.",
+            values,
+        )
+    return Finding(
+        "cross_bureau.account_status", "account_status", Severity.POTENTIAL_INCONSISTENCY,
+        "Account status differs across bureaus without a clear open/closed contradiction.",
         values,
-        "Payment status differs across bureaus. Bureau vocabulary for this field varies "
-        "enough on its own that this needs closer review rather than an automatic rule.",
     )
 
 
-_FIELD_COMPARATORS = [_compare_balance, _compare_account_status, _compare_dofd, _compare_payment_status]
+def _max_date_gap(values: dict[str, Any]) -> int | None:
+    dates = [d for d in (parse_report_date(str(v)) for v in values.values()) if d]
+    if len(dates) < 2:
+        return None
+    return (max(dates) - min(dates)).days
 
 
-def compare_canonical_account(bureau_records: list[dict[str, Any]]) -> list[ComparisonFinding]:
-    """
-    bureau_records: one dict per bureau, each with at least "bureau" and
-    whichever of balance/account_status/payment_status/
-    date_of_first_delinquency are known. Records from only one bureau
-    produce no findings — there's nothing to compare yet.
-    """
-    if len(bureau_records) < 2:
+def _compare_dofd(records: list[dict[str, Any]]) -> Finding | None:
+    values = _values(records, "date_of_first_delinquency")
+    gap = _max_date_gap(values)
+    if gap is None or gap <= DATE_TOLERANCE_DAYS:
+        return None
+    if gap > DOFD_MATERIAL_GAP_DAYS:
+        return Finding(
+            "cross_bureau.dofd", "date_of_first_delinquency", Severity.SUPPORTED_DISPUTE_GROUND,
+            f"Date of First Delinquency differs by {gap} days across bureaus. DOFD sets the end of "
+            "the reporting period for adverse items (15 U.S.C. § 1681c(a), (c)), so at most one of "
+            "these dates can be accurate and the later one would extend reporting.",
+            values,
+        )
+    return Finding(
+        "cross_bureau.dofd", "date_of_first_delinquency", Severity.POTENTIAL_INCONSISTENCY,
+        f"Date of First Delinquency differs by {gap} days across bureaus.",
+        values,
+    )
+
+
+def _compare_date_opened(records: list[dict[str, Any]]) -> Finding | None:
+    values = _values(records, "date_opened")
+    gap = _max_date_gap(values)
+    if gap is None or gap <= OPEN_DATE_TOLERANCE_DAYS:
+        return None
+    return Finding(
+        "cross_bureau.date_opened", "date_opened", Severity.POTENTIAL_INCONSISTENCY,
+        f"Date opened differs by {gap} days across bureaus.",
+        values,
+    )
+
+
+def _compare_payment_status(records: list[dict[str, Any]]) -> Finding | None:
+    values = _values(records, "payment_status")
+    if len({normalize_status(v) for v in values.values()}) < 2:
+        return None
+    return Finding(
+        "cross_bureau.payment_status", "payment_status", Severity.POTENTIAL_INCONSISTENCY,
+        "Payment status differs across bureaus. Bureau wording for this field varies, so it "
+        "needs review against the month-by-month payment history rather than an automatic rule.",
+        values,
+    )
+
+
+def _compare_credit_limit(records: list[dict[str, Any]]) -> Finding | None:
+    values = _values(records, "credit_limit")
+    if len(values) < 2 or max(values.values()) - min(values.values()) <= BALANCE_TOLERANCE:
+        return None
+    return Finding(
+        "cross_bureau.credit_limit", "credit_limit", Severity.POTENTIAL_INCONSISTENCY,
+        "Credit limit differs across bureaus, which changes reported utilization on the lower one.",
+        values,
+    )
+
+
+_COMPARATORS: list[Callable[[list[dict[str, Any]]], Finding | None]] = [
+    _compare_balance,
+    _compare_account_status,
+    _compare_dofd,
+    _compare_date_opened,
+    _compare_payment_status,
+    _compare_credit_limit,
+]
+
+
+def compare_bureau_records(bureau_records: list[dict[str, Any]]) -> list[Finding]:
+    """One dict per bureau (key "bureau" plus any known account fields).
+    Fewer than two bureaus means there's nothing to compare."""
+    if len({r["bureau"] for r in bureau_records}) < 2:
         return []
-    findings = [f for comparator in _FIELD_COMPARATORS if (f := comparator(bureau_records)) is not None]
-    return sorted(findings, key=lambda f: _SEVERITY_ORDER[f.severity], reverse=True)
+    return sort_by_severity([f for compare in _COMPARATORS if (f := compare(bureau_records)) is not None])

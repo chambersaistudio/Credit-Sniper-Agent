@@ -1,0 +1,190 @@
+"""
+Provider adapters. The only modules in the app allowed to import a vendor
+SDK. Each adapter takes a resolved TierConfig plus a Pydantic output type
+and returns a validated instance with token usage — or raises one of the
+AI layer's own error types.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Generic, Protocol, TypeVar
+
+from pydantic import BaseModel, ValidationError
+
+from app.config import settings
+from app.services.ai.config import TierConfig
+from app.services.ai.errors import (
+    AIConfigurationError,
+    AIProviderError,
+    AIRefusalError,
+    AIResponseError,
+)
+
+T = TypeVar("T", bound=BaseModel)
+
+
+@dataclass
+class ProviderResult(Generic[T]):
+    output: T
+    provider: str
+    model: str  # the model that actually served the request (may differ after a fallback)
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    latency_ms: float
+
+
+class Provider(Protocol):
+    name: str
+
+    async def generate(
+        self, config: TierConfig, *, system: str, prompt: str, output_type: type[T], max_tokens: int
+    ) -> ProviderResult[T]: ...
+
+
+class AnthropicProvider:
+    name = "anthropic"
+
+    def __init__(self) -> None:
+        import anthropic
+
+        self._anthropic = anthropic
+        # No key argument when unset: the SDK then resolves credentials from
+        # ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / an `ant auth` profile.
+        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+
+    async def generate(self, config, *, system, prompt, output_type, max_tokens):
+        from anthropic.lib._parse._transform import transform_schema
+
+        output_config: dict = {
+            "format": {"type": "json_schema", "schema": transform_schema(output_type.model_json_schema())}
+        }
+        if config.effort:
+            output_config["effort"] = config.effort
+
+        kwargs: dict = {
+            "model": config.model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": prompt}],
+            "output_config": output_config,
+        }
+        if config.refusal_fallback:
+            kwargs["betas"] = ["server-side-fallback-2026-07-01"]
+            kwargs["fallbacks"] = "default"
+
+        start = time.monotonic()
+        try:
+            # Streamed so long adaptive-thinking turns at high effort don't
+            # hit non-streaming HTTP timeouts.
+            async with self._client.beta.messages.stream(**kwargs) as stream:
+                message = await stream.get_final_message()
+        except self._anthropic.AuthenticationError as e:
+            raise AIConfigurationError(f"Anthropic authentication failed: {e.message}") from e
+        except self._anthropic.APIStatusError as e:
+            raise AIProviderError(f"Anthropic API error {e.status_code}: {e.message}") from e
+        except self._anthropic.APIConnectionError as e:
+            raise AIProviderError(f"Could not reach Anthropic API: {e}") from e
+        except self._anthropic.AnthropicError as e:
+            raise AIConfigurationError(f"Anthropic client error: {e}") from e
+        latency_ms = (time.monotonic() - start) * 1000
+
+        if message.stop_reason == "refusal":
+            category = getattr(message.stop_details, "category", None) if message.stop_details else None
+            raise AIRefusalError(f"Model declined the request (category={category})")
+        if message.stop_reason == "max_tokens":
+            raise AIResponseError(f"Response truncated at max_tokens={max_tokens}")
+
+        text = "".join(block.text for block in message.content if block.type == "text")
+        try:
+            output = output_type.model_validate_json(text)
+        except ValidationError as e:
+            raise AIResponseError(f"Model output failed schema validation: {e}") from e
+
+        usage = message.usage
+        return ProviderResult(
+            output=output,
+            provider=self.name,
+            model=message.model,
+            input_tokens=usage.input_tokens or 0,
+            output_tokens=usage.output_tokens or 0,
+            cache_read_tokens=usage.cache_read_input_tokens or 0,
+            cache_write_tokens=usage.cache_creation_input_tokens or 0,
+            latency_ms=latency_ms,
+        )
+
+
+class OpenAIProvider:
+    name = "openai"
+
+    def __init__(self) -> None:
+        import openai
+
+        self._openai = openai
+        self._client = openai.AsyncOpenAI(api_key=settings.openai_api_key or None)
+
+    async def generate(self, config, *, system, prompt, output_type, max_tokens):
+        start = time.monotonic()
+        try:
+            completion = await self._client.chat.completions.parse(
+                model=config.model,
+                max_completion_tokens=max_tokens,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                response_format=output_type,
+            )
+        except self._openai.LengthFinishReasonError as e:
+            raise AIResponseError(f"Response truncated at max_tokens={max_tokens}") from e
+        except self._openai.AuthenticationError as e:
+            raise AIConfigurationError(f"OpenAI authentication failed: {e.message}") from e
+        except self._openai.APIStatusError as e:
+            raise AIProviderError(f"OpenAI API error {e.status_code}: {e.message}") from e
+        except self._openai.APIConnectionError as e:
+            raise AIProviderError(f"Could not reach OpenAI API: {e}") from e
+        except self._openai.OpenAIError as e:
+            raise AIConfigurationError(f"OpenAI client error: {e}") from e
+        except ValidationError as e:
+            raise AIResponseError(f"Model output failed schema validation: {e}") from e
+        latency_ms = (time.monotonic() - start) * 1000
+
+        message = completion.choices[0].message
+        if message.refusal:
+            raise AIRefusalError(f"Model declined the request: {message.refusal}")
+        if message.parsed is None:
+            raise AIResponseError("Model returned no structured output")
+
+        usage = completion.usage
+        cached = 0
+        if usage and usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens:
+            cached = usage.prompt_tokens_details.cached_tokens
+        return ProviderResult(
+            output=message.parsed,
+            provider=self.name,
+            model=completion.model,
+            input_tokens=(usage.prompt_tokens - cached) if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
+            cache_read_tokens=cached,
+            cache_write_tokens=0,
+            latency_ms=latency_ms,
+        )
+
+
+_FACTORIES = {"anthropic": AnthropicProvider, "openai": OpenAIProvider}
+_instances: dict[str, Provider] = {}
+
+
+def get_provider(name: str) -> Provider:
+    if name not in _FACTORIES:
+        raise AIConfigurationError(f"Unknown AI provider: {name!r}")
+    if name not in _instances:
+        try:
+            _instances[name] = _FACTORIES[name]()
+        except ImportError as e:
+            raise AIConfigurationError(f"SDK for provider {name!r} is not installed") from e
+    return _instances[name]
+
+
+def register_provider(name: str, provider: Provider) -> None:
+    """Install a provider instance directly (tests, or a new vendor adapter)."""
+    _instances[name] = provider

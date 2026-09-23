@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   db:
     image: postgres:16-alpine
@@ -18,16 +16,6 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
 
   backend:
     build: ./backend
@@ -35,8 +23,6 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://creditsniper:password@db:5432/creditsniper
-      SYNC_DATABASE_URL: postgresql://creditsniper:password@db:5432/creditsniper
-      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -44,8 +30,6 @@ services:
       - uploads:/app/uploads
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 

@@ -23,8 +23,13 @@ BUREAU_PATTERNS = {
 STATUS_MAP = {
     "charge off": "charged_off",
     "charged off": "charged_off",
+    "charge-off": "charged_off",
+    "chargeoff": "charged_off",
     "collection": "collection",
     "in collections": "collection",
+    "transferred": "transferred",
+    "sold": "sold",
+    "paid": "paid",
     "closed": "closed",
     "open": "open",
     "current": "current",
@@ -37,10 +42,6 @@ STATUS_MAP = {
     "120": "120d_late",
 }
 
-# 7-year FCRA reporting limit (most negative items)
-FCRA_7_YEAR_LIMIT = 7
-# 10-year limit for Chapter 7 bankruptcy
-FCRA_10_YEAR_LIMIT = 10
 
 
 def parse_credit_report_pdf(file_path: str) -> dict[str, Any]:
@@ -92,13 +93,20 @@ def _pypdf_fallback(file_path: str) -> str:
 
 
 def _detect_bureau(text: str) -> str:
-    detected = []
-    for bureau, pattern in BUREAU_PATTERNS.items():
-        if pattern.search(text):
-            detected.append(bureau)
-    if len(detected) >= 2:
-        return "tri_merge"
-    return detected[0] if detected else "unknown"
+    """Single-bureau reports routinely mention the other two (dispute
+    addresses, footers), so a mention alone isn't enough: one bureau must
+    clearly dominate. Otherwise it's a tri-merge (all three even) or
+    unknown — the caller then asks the user rather than guessing."""
+    counts = {bureau: len(pattern.findall(text)) for bureau, pattern in BUREAU_PATTERNS.items()}
+    mentioned = sorted((c, b) for b, c in counts.items() if c)
+    if not mentioned:
+        return "unknown"
+    if len(mentioned) == 1:
+        return mentioned[0][1]
+    (second_count, _), (top_count, top) = mentioned[-2], mentioned[-1]
+    if top_count >= 3 * second_count:
+        return top
+    return "tri_merge" if len(mentioned) == 3 else "unknown"
 
 
 def _extract_credit_score(text: str) -> int | None:
@@ -219,59 +227,93 @@ def _accounts_section_only(text: str) -> str:
     return text[: match.start()] if match else text
 
 
+# Label synonyms -> field. Every label maps to exactly one field, so e.g.
+# "High Balance" can never be read as the balance and "Original Creditor"
+# never as the creditor. Labels that belong to no field we store (like
+# "original creditor") are still listed so they don't get swallowed by a
+# shorter label inside them.
+_ACCOUNT_LABELS: dict[str, tuple[str, ...]] = {
+    "creditor_name": ("creditor name", "creditor", "company name", "company", "lender", "collection agency", "subscriber name"),
+    "original_creditor": ("original creditor",),
+    "account_number": ("account number", "account #", "account no", "acct number", "acct #", "acct no"),
+    "account_type": ("account type", "type of account", "loan type"),
+    "account_status": ("account status", "account condition", "condition", "status"),
+    "payment_status": ("payment status", "pay status", "current payment status"),
+    "balance": ("current balance", "balance owed", "balance", "amount owed"),
+    "high_balance": ("high balance", "highest balance", "high credit"),
+    "original_amount": ("original amount", "original loan amount"),
+    "credit_limit": ("credit limit", "limit"),
+    "past_due_amount": ("amount past due", "past due amount", "past due"),
+    "monthly_payment": ("monthly payment", "scheduled payment"),
+    "date_opened": ("date opened", "open date", "opened"),
+    "date_closed": ("date closed", "closed date"),
+    "date_of_first_delinquency": ("date of first delinquency", "date of 1st delinquency", "first delinquency", "dofd"),
+    "date_last_reported": ("date last reported", "last reported", "date reported", "date updated", "last updated"),
+    "date_last_payment": ("date of last payment", "last payment date", "last payment"),
+    "date_last_active": ("date of last activity", "last activity", "last active"),
+    "remarks": ("remarks", "remark", "comments", "comment"),
+}
+_LABEL_TO_FIELD = {label: f for f, labels in _ACCOUNT_LABELS.items() for label in labels}
+_LABEL_PATTERN = re.compile(
+    r"(?<![A-Za-z])("
+    + "|".join(re.escape(label).replace(r"\ ", r"\s+") for label in sorted(_LABEL_TO_FIELD, key=len, reverse=True))
+    + r")\s*:",
+    re.IGNORECASE,
+)
+
+_MONEY_FIELDS = {"balance", "high_balance", "original_amount", "credit_limit", "past_due_amount", "monthly_payment"}
+_DATE_FIELDS = {"date_opened", "date_closed", "date_of_first_delinquency", "date_last_reported", "date_last_payment", "date_last_active"}
+_DATE_VALUE = re.compile(
+    r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{1,2}(?:-\d{1,2})?|\d{1,2}[/-]\d{4}|[A-Za-z]{3,9}\.?\s+(?:\d{1,2},?\s+)?\d{4}"
+)
+_MONEY_VALUE = re.compile(r"\$?\s*(-?[\d,]+(?:\.\d{1,2})?)")
+_ACCOUNT_NUMBER_VALUE = re.compile(r"[Xx*\d][Xx*\d\- ]{2,28}[Xx*\d]")
+
+
+def _labeled_values(block: str) -> list[tuple[str, str]]:
+    """(field, raw value) pairs in document order. A value runs to the next
+    known label or the end of the line, whichever comes first — so both
+    one-field-per-line and two-column layouts parse."""
+    matches = list(_LABEL_PATTERN.finditer(block))
+    pairs = []
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(block)
+        value = block[match.end():end].split("\n", 1)[0].strip(" \t|;,")
+        field = _LABEL_TO_FIELD[re.sub(r"\s+", " ", match.group(1).lower())]
+        pairs.append((field, value))
+    return pairs
+
+
 def _parse_account_block(block: str) -> dict[str, Any]:
-    account = {"raw_block": block}
+    account: dict[str, Any] = {"raw_block": block}
 
-    creditor_match = re.search(
-        r"(?:creditor|company|lender|collection\s+agency)[:\s]+(.+?)(?:\n|account)", block, re.IGNORECASE
-    )
-    if creditor_match:
-        account["creditor_name"] = creditor_match.group(1).strip()
-
-    acct_match = re.search(
-        r"(?:account\s*(?:#|number|num)|acct)[:\s#]+([X*\d-]{4,20})", block, re.IGNORECASE
-    )
-    if acct_match:
-        account["account_number"] = acct_match.group(1).strip()
-
-    balance_match = re.search(
-        r"(?:balance|amount\s+owed)[:\s]+\$?([\d,]+(?:\.\d{2})?)", block, re.IGNORECASE
-    )
-    if balance_match:
-        account["balance"] = float(balance_match.group(1).replace(",", ""))
-
-    limit_match = re.search(
-        r"(?:credit\s+limit|high\s+balance|original\s+amount)[:\s]+\$?([\d,]+(?:\.\d{2})?)", block, re.IGNORECASE
-    )
-    if limit_match:
-        account["credit_limit"] = float(limit_match.group(1).replace(",", ""))
-
-    status_text = ""
-    status_match = re.search(
-        r"(?:account\s+status|status|payment\s+status)[:\s]+(.+?)(?:\n|date|balance)", block, re.IGNORECASE
-    )
-    if status_match:
-        status_text = status_match.group(1).strip().lower()
-        for key, val in STATUS_MAP.items():
-            if key in status_text:
-                account["account_status"] = val
-                break
-
-    for date_field, pattern in [
-        ("date_opened", r"(?:date\s+opened|opened)[:\s]+(\w+\s+\d{4}|\d{1,2}[/-]\d{4})"),
-        ("date_closed", r"(?:date\s+closed|closed)[:\s]+(\w+\s+\d{4}|\d{1,2}[/-]\d{4})"),
-        ("date_of_first_delinquency", r"(?:date\s+of\s+first\s+delinquency|first\s+delinquency|dofd)[:\s]+(\w+\s+\d{4}|\d{1,2}[/-]\d{4})"),
-        ("date_last_reported", r"(?:date\s+(?:last\s+)?reported|last\s+reported)[:\s]+(\w+\s+\d{4}|\d{1,2}[/-]\d{4})"),
-    ]:
-        match = re.search(pattern, block, re.IGNORECASE)
-        if match:
-            account[date_field] = match.group(1)
-
-    type_match = re.search(
-        r"(?:account\s+type|type)[:\s]+(.+?)(?:\n|status|balance)", block, re.IGNORECASE
-    )
-    if type_match:
-        account["account_type"] = type_match.group(1).strip()
+    for field, value in _labeled_values(block):
+        if not value or field in account:
+            continue  # first occurrence wins; never overwrite with a later, less specific one
+        if field in _MONEY_FIELDS:
+            money = _MONEY_VALUE.match(value)
+            if money:
+                account[field] = float(money.group(1).replace(",", ""))
+        elif field in _DATE_FIELDS:
+            date_match = _DATE_VALUE.search(value)
+            if date_match:
+                account[field] = date_match.group(0)
+        elif field == "account_status":
+            lowered = value.lower()
+            for key, normalized in STATUS_MAP.items():
+                if key in lowered:
+                    account["account_status"] = normalized
+                    break
+            account["account_status_raw"] = value
+        elif field == "account_number":
+            number = _ACCOUNT_NUMBER_VALUE.search(value)
+            if number:
+                account["account_number"] = number.group(0).strip()
+            elif "creditor_name" not in account:
+                # Some layouts label the tradeline heading "Account #: <creditor>".
+                account["creditor_name"] = value
+        else:
+            account[field] = value
 
     return account
 
@@ -320,22 +362,3 @@ def _extract_inquiries_raw(text: str) -> list[dict[str, Any]]:
             inquiries.append(inquiry)
 
     return inquiries
-
-
-def check_7_year_rule(date_of_first_delinquency: str, report_date: str | None = None) -> bool:
-    """
-    Returns True if account has exceeded 7-year FCRA reporting limit.
-    Uses DOFD (date of first delinquency) as the start of the 7-year clock.
-    """
-    try:
-        from dateutil import parser as dateparser
-        dofd = dateparser.parse(date_of_first_delinquency)
-        if report_date:
-            ref_date = dateparser.parse(report_date)
-        else:
-            ref_date = datetime.now()
-
-        years_elapsed = (ref_date - dofd).days / 365.25
-        return years_elapsed > FCRA_7_YEAR_LIMIT
-    except Exception:
-        return False

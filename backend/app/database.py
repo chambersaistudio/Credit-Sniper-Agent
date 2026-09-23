@@ -1,13 +1,15 @@
+import asyncio
 import os
+from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 from app.config import settings
 
-# Vercel serverless functions don't persist between requests, so connection
-# pooling causes stale-connection errors. NullPool opens/closes per request
-# and works correctly with Neon/Vercel Postgres's external pgbouncer pooler.
-_pool_kwargs = {"poolclass": NullPool} if os.getenv("VERCEL") else {}
+# Serverless functions don't persist between requests, so pooled connections
+# go stale; NullPool opens/closes per request (Neon/Vercel Postgres pool
+# externally). Tests use it too, since each test runs on its own event loop.
+_pool_kwargs = {"poolclass": NullPool} if (os.getenv("VERCEL") or os.getenv("DB_NULL_POOL")) else {}
 
 engine = create_async_engine(settings.database_url, echo=settings.debug, **_pool_kwargs)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -25,6 +27,20 @@ async def get_db() -> AsyncSession:
             await session.close()
 
 
-async def create_tables():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+
+
+def _upgrade_to_head() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config(str(ALEMBIC_INI))
+    config.set_main_option("script_location", str(ALEMBIC_INI.parent / "alembic"))
+    config.attributes["configure_logging"] = False
+    command.upgrade(config, "head")
+
+
+async def run_migrations() -> None:
+    """Apply pending schema migrations. Alembic's env drives its own event
+    loop, so it runs in a worker thread rather than on the app's loop."""
+    await asyncio.to_thread(_upgrade_to_head)

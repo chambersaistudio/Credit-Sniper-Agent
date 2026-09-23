@@ -7,13 +7,13 @@ echo "🚀 Starting Credit Sniper Agent..."
 if [ ! -f .env ]; then
     echo "📋 Creating .env from template..."
     cp .env.example .env
-    echo "⚠️  Edit .env and add your ANTHROPIC_API_KEY before continuing"
+    echo "⚠️  Edit .env and add your ANTHROPIC_API_KEY (or run `ant auth login`) before continuing"
     exit 1
 fi
 
 # Start with Docker Compose
 echo "🐳 Starting services with Docker Compose..."
-docker compose up -d db redis
+docker compose up -d db
 
 echo "⏳ Waiting for database..."
 sleep 5
@@ -30,9 +30,8 @@ echo "   Backend API:  http://localhost:8000"
 echo "   Frontend UI:  http://localhost:5173"
 echo "   API Docs:     http://localhost:8000/docs"
 echo ""
-echo "📖 Phase 1 workflow:"
-echo "   1. Set up your profile at http://localhost:5173/profile"
-echo "   2. Upload a credit report at http://localhost:5173/upload"
-echo "   3. Review AI analysis and start disputes"
-echo "   4. Approve letters and send via certified mail"
-echo "   5. Record bureau responses when received"
+echo "📖 Workflow:"
+echo "   1. Upload each bureau's report (Reports tab)"
+echo "   2. Review accounts and findings; evaluate the ones you want checked"
+echo "   3. Open a case where a dispute ground exists, review the package, approve"
+echo "   4. Send it, record when, and record the response when it arrives"

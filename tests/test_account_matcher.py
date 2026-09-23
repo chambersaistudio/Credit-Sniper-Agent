@@ -1,4 +1,9 @@
+import uuid
+
 from app.services.account_matcher import (
+    Candidate,
+    LinkedRecord,
+    choose_candidate,
     normalize_creditor_name,
     score_match,
     AUTO_LINK_THRESHOLD,
@@ -43,3 +48,39 @@ def test_missing_fields_produce_conservative_moderate_confidence():
     b = {"creditor_name": "Chase", "account_number": None, "date_opened": "01/2021"}
     result = score_match(a, b)
     assert result.confidence < AUTO_LINK_THRESHOLD
+
+
+REPORT_A, REPORT_B = uuid.uuid4(), uuid.uuid4()
+CAP_ONE = {"creditor_name": "Capital One", "account_number": "XXXX-4521", "date_opened": "03/2015"}
+
+
+def _candidate(*records):
+    return Candidate(canonical_id=uuid.uuid4(), records=[LinkedRecord(*r) for r in records])
+
+
+def test_links_across_bureaus():
+    candidate = _candidate(("equifax", REPORT_A, CAP_ONE))
+    chosen, _ = choose_candidate(CAP_ONE, "experian", REPORT_B, [candidate])
+    assert chosen is candidate
+
+
+def test_never_merges_two_tradelines_from_the_same_bureau_report():
+    # Previously a canonical account already holding an Experian record could
+    # absorb a second, identical-looking Experian tradeline from the same report.
+    candidate = _candidate(("equifax", REPORT_A, CAP_ONE), ("experian", REPORT_B, CAP_ONE))
+    chosen, _ = choose_candidate(CAP_ONE, "experian", REPORT_B, [candidate])
+    assert chosen is None
+
+
+def test_newer_report_from_same_bureau_links_to_existing_account():
+    candidate = _candidate(("experian", REPORT_A, CAP_ONE))
+    chosen, _ = choose_candidate(CAP_ONE, "experian", REPORT_B, [candidate])
+    assert chosen is candidate
+
+
+def test_scores_against_every_linked_record_not_just_the_first():
+    weak = {"creditor_name": "Cap One Services", "account_number": None, "date_opened": None}
+    candidate = _candidate(("equifax", REPORT_A, weak), ("transunion", REPORT_A, CAP_ONE))
+    chosen, result = choose_candidate(CAP_ONE, "experian", REPORT_B, [candidate])
+    assert chosen is candidate
+    assert result.confidence >= 0.9

@@ -1,37 +1,42 @@
 """
 Cross-bureau account matching.
 
-Decides whether two bureau-specific tradelines (one CreditAccount row each,
-from different bureau reports) are the same real-world account. This is
-deliberately conservative: "do not assume slightly different accounts are
-identical solely because names are similar" (Phase 1.5 spec). A pair either
-clears the confidence threshold and gets linked to a shared
-CanonicalAccount, or it doesn't and stays its own single-record canonical
-account — there's no forced/best-guess match.
+Decides whether bureau-specific tradelines (one CreditAccount row each) are
+the same real-world account, and links them to a shared CanonicalAccount.
+Deliberately conservative — "do not assume slightly different accounts are
+identical solely because names are similar": a record either clears the
+confidence threshold or becomes its own canonical account. Never forced.
 
-Pure scoring logic (`score_match`) is separated from DB I/O
-(`match_account_to_existing`) so the matching rules can be unit tested
-without a database.
+Hard constraint: a canonical account holds at most one record per bureau
+*per report*. Two Experian tradelines from the same report are never the
+same account, however alike they look — that's a duplicate-reporting
+question for the reasoning engine, not a merge. A record from a newer
+Experian report can join the canonical account holding last month's
+Experian record: that's the same tradeline, re-reported.
 """
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.models.canonical_account import CanonicalAccount, AccountLink
+from app.models.canonical_account import AccountLink, CanonicalAccount
 from app.models.credit_report import CreditAccount
+from app.utils.dates import parse_report_date
 
-# Below this, a pair is not linked — left as separate canonical accounts.
 AUTO_LINK_THRESHOLD = 0.7
 
+# Weights sum to 1.0 and are NOT renormalized over whichever signals happen
+# to be present: a missing account number must lower confidence, not let
+# name similarity alone clear the threshold.
+_WEIGHTS = {"account_number_suffix": 0.45, "creditor_name": 0.4, "date_opened": 0.15}
+
 _CREDITOR_SUFFIXES = re.compile(
-    r"\b(bank|na|llc|inc|corp|corporation|co|company|usa|bk|assn|association)\b",
-    re.IGNORECASE,
+    r"\b(bank|na|llc|inc|corp|corporation|co|company|usa|bk|assn|association)\b", re.IGNORECASE
 )
 _NON_ALNUM = re.compile(r"[^a-z0-9 ]")
 
@@ -39,11 +44,8 @@ _NON_ALNUM = re.compile(r"[^a-z0-9 ]")
 def normalize_creditor_name(name: str | None) -> str:
     if not name:
         return ""
-    normalized = name.lower()
-    # Drop periods first so "N.A." collapses to "na" and matches the plain
-    # "na" suffix below — \b won't reliably match right after a trailing
-    # "." at end-of-string, since neither side of that boundary is \w.
-    normalized = normalized.replace(".", "")
+    # Drop periods first so "N.A." collapses to the plain "na" suffix.
+    normalized = name.lower().replace(".", "")
     normalized = _CREDITOR_SUFFIXES.sub(" ", normalized)
     normalized = _NON_ALNUM.sub(" ", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
@@ -56,17 +58,6 @@ def account_number_suffix(account_number: str | None) -> str | None:
     return digits[-4:] if len(digits) >= 4 else (digits or None)
 
 
-def _parse_date(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    for fmt in ("%m/%d/%Y", "%m/%Y", "%Y-%m-%d", "%Y-%m", "%m-%Y"):
-        try:
-            return datetime.strptime(value.strip(), fmt)
-        except ValueError:
-            continue
-    return None
-
-
 @dataclass
 class MatchResult:
     confidence: float
@@ -74,105 +65,119 @@ class MatchResult:
 
 
 def score_match(a: dict[str, Any], b: dict[str, Any]) -> MatchResult:
-    """
-    Score whether two bureau tradelines (as dicts with creditor_name,
-    account_number, date_opened) represent the same real-world account.
-    """
-    matched_fields: dict[str, float] = {}
+    """Score two tradelines (dicts with creditor_name, account_number, date_opened)."""
+    matched: dict[str, float] = {}
 
     suffix_a = account_number_suffix(a.get("account_number"))
     suffix_b = account_number_suffix(b.get("account_number"))
     if suffix_a and suffix_b:
         if suffix_a != suffix_b:
-            # Strong disqualifying signal — different account numbers on
-            # both sides means different accounts, regardless of name.
-            return MatchResult(confidence=0.0, matched_fields={"account_number_suffix": 0.0})
-        matched_fields["account_number_suffix"] = 1.0
+            return MatchResult(0.0, {"account_number_suffix": 0.0})
+        matched["account_number_suffix"] = 1.0
 
     name_a = normalize_creditor_name(a.get("creditor_name"))
     name_b = normalize_creditor_name(b.get("creditor_name"))
-    name_similarity = SequenceMatcher(None, name_a, name_b).ratio() if name_a and name_b else 0.0
-    matched_fields["creditor_name"] = round(name_similarity, 3)
+    matched["creditor_name"] = round(SequenceMatcher(None, name_a, name_b).ratio(), 3) if name_a and name_b else 0.0
 
-    date_a = _parse_date(a.get("date_opened"))
-    date_b = _parse_date(b.get("date_opened"))
-    if date_a and date_b:
-        days_apart = abs((date_a - date_b).days)
-        # Full credit inside ~2 months (bureaus often report slightly
-        # different open dates for the same account); linear falloff to 0
-        # by a year apart.
-        date_score = max(0.0, 1.0 - max(0, days_apart - 60) / 305)
-        matched_fields["date_opened"] = round(date_score, 3)
+    opened_a = parse_report_date(a.get("date_opened"))
+    opened_b = parse_report_date(b.get("date_opened"))
+    if opened_a and opened_b:
+        days_apart = abs((opened_a - opened_b).days)
+        # Full credit within ~2 months; linear falloff to 0 by a year apart.
+        matched["date_opened"] = round(max(0.0, 1.0 - max(0, days_apart - 60) / 305), 3)
 
-    weights = {"account_number_suffix": 0.45, "creditor_name": 0.4, "date_opened": 0.15}
-    # Weights sum to 1.0 by construction, and we deliberately do NOT
-    # renormalize over only the signals that happen to be present: a
-    # missing account number shouldn't let name similarity alone punch
-    # above the auto-link threshold ("do not assume slightly different
-    # accounts are identical solely because names are similar").
-    confidence = sum(matched_fields.get(field, 0.0) * weight for field, weight in weights.items())
-    return MatchResult(confidence=round(confidence, 3), matched_fields=matched_fields)
+    confidence = sum(matched.get(name, 0.0) * weight for name, weight in _WEIGHTS.items())
+    return MatchResult(round(confidence, 3), matched)
 
 
-async def match_account_to_existing(
-    db: AsyncSession, user_id: uuid.UUID, account: CreditAccount
-) -> CanonicalAccount:
-    """
-    Find or create the CanonicalAccount for a newly-parsed CreditAccount.
-    Compares against the user's other bureaus' accounts; links to the
-    best match above AUTO_LINK_THRESHOLD, or creates a new canonical
-    account (unlinked to anything yet) if nothing matches well enough.
-    """
-    candidate_result = await db.execute(
-        select(CreditAccount, CanonicalAccount, AccountLink)
-        .join(AccountLink, AccountLink.credit_account_id == CreditAccount.id)
-        .join(CanonicalAccount, CanonicalAccount.id == AccountLink.canonical_account_id)
-        .where(CanonicalAccount.user_id == user_id, CreditAccount.bureau != account.bureau)
-    )
+@dataclass
+class LinkedRecord:
+    bureau: str
+    report_id: uuid.UUID
+    fields: dict[str, Any]
 
-    account_dict = {
+
+@dataclass
+class Candidate:
+    """A canonical account as the matcher sees it: every record linked to it."""
+
+    canonical_id: uuid.UUID
+    records: list[LinkedRecord]
+
+    def occupied_by(self, bureau: str, report_id: uuid.UUID) -> bool:
+        return any(r.bureau == bureau and r.report_id == report_id for r in self.records)
+
+
+def choose_candidate(
+    record: dict[str, Any], bureau: str, report_id: uuid.UUID, candidates: list[Candidate]
+) -> tuple[Candidate | None, MatchResult]:
+    """Best candidate above threshold whose slot for this bureau isn't
+    already taken by another record from the same report, scoring against
+    every record it holds and keeping the strongest."""
+    best: Candidate | None = None
+    best_result = MatchResult(0.0)
+    for candidate in candidates:
+        if candidate.occupied_by(bureau, report_id):
+            continue
+        for other in candidate.records:
+            result = score_match(record, other.fields)
+            if result.confidence > best_result.confidence:
+                best, best_result = candidate, result
+    if best is None or best_result.confidence < AUTO_LINK_THRESHOLD:
+        return None, best_result
+    return best, best_result
+
+
+def _match_fields(account: CreditAccount) -> dict[str, Any]:
+    return {
         "creditor_name": account.creditor_name,
         "account_number": account.account_number,
         "date_opened": account.date_opened,
     }
 
-    best_canonical: CanonicalAccount | None = None
-    best_result = MatchResult(confidence=0.0)
-    seen_canonical_ids: set[uuid.UUID] = set()
-    for other_account, canonical, _link in candidate_result.all():
-        if canonical.id in seen_canonical_ids:
-            continue
-        seen_canonical_ids.add(canonical.id)
-        other_dict = {
-            "creditor_name": other_account.creditor_name,
-            "account_number": other_account.account_number,
-            "date_opened": other_account.date_opened,
-        }
-        result = score_match(account_dict, other_dict)
-        if result.confidence > best_result.confidence:
-            best_result = result
-            best_canonical = canonical
 
-    if best_canonical is not None and best_result.confidence >= AUTO_LINK_THRESHOLD:
-        canonical = best_canonical
-    else:
-        canonical = CanonicalAccount(
-            user_id=user_id,
-            creditor_name=account.creditor_name or "Unknown Creditor",
-            account_type=account.account_type,
-            account_number_last_four=account_number_suffix(account.account_number),
+async def link_accounts(db: AsyncSession, user_id: uuid.UUID, accounts: list[CreditAccount]) -> None:
+    """Link each newly stored CreditAccount (already flushed, so it has an id)
+    to an existing or new CanonicalAccount. Loads the user's candidates once
+    and updates them in memory, so records within one upload are matched
+    against each other's assignments too."""
+    result = await db.execute(
+        select(CanonicalAccount)
+        .where(CanonicalAccount.user_id == user_id)
+        .options(selectinload(CanonicalAccount.links).selectinload(AccountLink.credit_account))
+    )
+    candidates = [
+        Candidate(
+            canonical_id=c.id,
+            records=[
+                LinkedRecord(link.bureau, link.credit_account.report_id, _match_fields(link.credit_account))
+                for link in c.links
+            ],
         )
-        db.add(canonical)
-        await db.flush()
-        best_result = MatchResult(confidence=1.0, matched_fields={"first_record": 1.0})
+        for c in result.scalars().all()
+    ]
 
-    db.add(
-        AccountLink(
-            canonical_account_id=canonical.id,
+    for account in accounts:
+        fields = _match_fields(account)
+        candidate, match = choose_candidate(fields, account.bureau, account.report_id, candidates)
+        if candidate is None:
+            canonical = CanonicalAccount(
+                user_id=user_id,
+                creditor_name=account.creditor_name or "Unknown creditor",
+                account_type=account.account_type,
+                account_number_last_four=account_number_suffix(account.account_number),
+            )
+            db.add(canonical)
+            await db.flush()
+            candidate = Candidate(canonical_id=canonical.id, records=[])
+            candidates.append(candidate)
+            match = MatchResult(1.0, {"first_record": 1.0})
+
+        candidate.records.append(LinkedRecord(account.bureau, account.report_id, fields))
+        db.add(AccountLink(
+            canonical_account_id=candidate.canonical_id,
             credit_account_id=account.id,
             bureau=account.bureau,
-            confidence=best_result.confidence,
-            matched_fields=best_result.matched_fields,
-        )
-    )
-    return canonical
+            confidence=match.confidence,
+            matched_fields=match.matched_fields,
+        ))

@@ -11,7 +11,6 @@ from app.services.pdf_parser import (
     _extract_accounts_raw,
     _parse_account_block,
     _extract_inquiries_raw,
-    check_7_year_rule,
 )
 
 SAMPLE_EQUIFAX_TEXT = """
@@ -103,23 +102,6 @@ def test_parse_account_block_balance_parsing():
     account = _parse_account_block(block)
     assert account.get("balance") == 12500.0
 
-
-def test_check_7_year_rule_old_account():
-    # Account from 2015 — well past 7 years from 2024
-    result = check_7_year_rule("01/2015", "01/2024")
-    assert result is True
-
-
-def test_check_7_year_rule_recent_account():
-    # Account from 2020 — within 7 years from 2024
-    result = check_7_year_rule("01/2020", "01/2024")
-    assert result is False
-
-
-def test_check_7_year_rule_invalid_date():
-    # Should not raise — return False on parse error
-    result = check_7_year_rule("not-a-date")
-    assert result is False
 
 
 def test_extract_accounts_raw_keeps_creditor_with_its_account_number():
