@@ -38,12 +38,23 @@ def evidence_key(user_id: uuid.UUID, claim_id: uuid.UUID, document_id: uuid.UUID
     return f"users/{user_id}/evidence/{claim_id}/{document_id}.{ext}"
 
 
+# How long a presigned download URL stays valid. Short: it is minted per
+# authorized request, used immediately by the browser, and then useless.
+SIGNED_URL_TTL_SECONDS = 120
+
+
 class Storage(Protocol):
     name: str
 
     async def put(self, key: str, data: bytes, content_type: str) -> None: ...
     async def get(self, key: str) -> bytes: ...
     async def delete(self, key: str) -> None: ...
+
+    def signed_url(self, key: str) -> str | None:
+        """A short-lived, credential-free URL the browser can fetch directly,
+        or None if this backend can't sign one (the caller then streams the
+        bytes through the API instead)."""
+        ...
 
 
 class LocalStorage:
@@ -71,6 +82,10 @@ class LocalStorage:
 
     async def delete(self, key):
         await asyncio.to_thread(self._path(key).unlink, True)
+
+    def signed_url(self, key: str) -> str | None:
+        # Local files aren't reachable by URL; the API streams them instead.
+        return None
 
 
 class R2Storage:
@@ -113,6 +128,16 @@ class R2Storage:
 
     async def delete(self, key):
         await asyncio.to_thread(self._client.delete_object, Bucket=self.bucket, Key=key)
+
+    def signed_url(self, key: str) -> str | None:
+        # Presigned GET against the private bucket. The URL carries a
+        # time-boxed signature, not the R2 credentials, so it is safe to hand
+        # to the browser and expires on its own.
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=SIGNED_URL_TTL_SECONDS,
+        )
 
 
 @lru_cache

@@ -1,9 +1,10 @@
 """
-User resolution until real authentication exists. Requests without a
-user_id (e.g. before a profile is saved) resolve to one real local user row,
-so foreign-key-constrained inserts never reference a nonexistent user.
-When auth lands, replace resolve_user_id with a dependency that reads the
-authenticated principal — call sites won't change.
+The single local user for AUTH_MODE=disabled (local development and tests).
+
+In hosted `jwt` mode this user is never used: identity comes only from the
+verified token (see app/auth.py), and no request may name a user id. This
+module exists so that with auth off, foreign-key-constrained inserts still
+reference a real user row.
 """
 import uuid
 
@@ -12,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
 
-DEFAULT_USER_SENTINEL = "default"
 DEFAULT_USER_EMAIL = "local-user@credit-sniper.local"
 # Fixed id, not an email lookup: the consumer can change their email in the
 # profile without the next request creating a second, empty user.
@@ -34,12 +34,3 @@ def parse_uuid(value: str, what: str = "id") -> uuid.UUID:
         return uuid.UUID(value)
     except (ValueError, TypeError):
         raise HTTPException(status_code=422, detail=f"Invalid {what}: {value!r}")
-
-
-async def resolve_user_id(db: AsyncSession, user_id: str | None) -> uuid.UUID:
-    if not user_id or user_id == DEFAULT_USER_SENTINEL:
-        return (await get_or_create_default_user(db)).id
-    resolved = parse_uuid(user_id, "user_id")
-    if await db.get(User, resolved) is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return resolved

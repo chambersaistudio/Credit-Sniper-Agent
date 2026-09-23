@@ -5,8 +5,28 @@
 const API_ORIGIN = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
 const BASE = `${API_ORIGIN}/api`
 
+// The app sets this to a function returning the current session token (see
+// auth.jsx). It stays null when auth is disabled (local dev), and requests
+// simply go without an Authorization header. The token is never persisted
+// here — it's fetched fresh per request, so it can't go stale.
+let tokenGetter = null
+export function setTokenGetter(fn) {
+  tokenGetter = fn
+}
+
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function request(path, { method = 'GET', body, form } = {}) {
   const init = { method, headers: {} }
+  if (tokenGetter) {
+    const token = await tokenGetter()
+    if (token) init.headers['Authorization'] = `Bearer ${token}`
+  }
   if (form) {
     init.body = form
   } else if (body !== undefined) {
@@ -17,9 +37,25 @@ async function request(path, { method = 'GET', body, form } = {}) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     const detail = Array.isArray(err.detail) ? err.detail.map(d => d.msg).join('; ') : err.detail
-    throw new Error(detail || `Request failed (${res.status})`)
+    throw new ApiError(detail || `Request failed (${res.status})`, res.status)
   }
   return res.json()
+}
+
+// Fetch a binary file with the bearer token attached (a plain <a href> can't
+// send it), then hand the browser a blob to open/save. Used for PDFs that
+// live behind the authenticated API.
+async function openFile(path) {
+  const headers = {}
+  if (tokenGetter) {
+    const token = await tokenGetter()
+    if (token) headers['Authorization'] = `Bearer ${token}`
+  }
+  const res = await fetch(`${BASE}${path}`, { headers })
+  if (!res.ok) throw new ApiError(`Request failed (${res.status})`, res.status)
+  const url = URL.createObjectURL(await res.blob())
+  window.open(url, '_blank', 'noopener')
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 export const api = {
@@ -48,7 +84,8 @@ export const api = {
     }),
   setFurnisherAddress: (id, address) => request(`/cases/${id}/furnisher`, { method: 'PATCH', body: { furnisher_address: address } }),
   generatePackage: (id) => request(`/cases/${id}/package`, { method: 'POST' }),
-  packagePdfUrl: (id) => `${BASE}/cases/${id}/package.pdf`,
+  openPackagePdf: (id) => openFile(`/cases/${id}/package.pdf`),
+  openReportFile: (id) => openFile(`/reports/${id}/file`),
   approveCase: (id) => request(`/cases/${id}/approve`, { method: 'POST' }),
   markSubmitted: (id, body) => request(`/cases/${id}/submitted`, { method: 'POST', body }),
   markDelivered: (id, body) => request(`/cases/${id}/delivered`, { method: 'POST', body }),

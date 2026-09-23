@@ -3,6 +3,7 @@ The consumer's normalized credit profile: one entry per real-world account,
 its current record per bureau, deterministic findings, the latest
 evaluation (claim), and any cases.
 """
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,15 +11,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.auth import current_user, current_user_id
 from app.database import get_db
 from app.models.case import Case, Claim
 from app.models.user import User
 from app.services.case_service import save_evaluation
-from app.services.credit_profile import load_account, load_profile, view_to_dict
+from app.services.credit_profile import AccountView, load_account, load_profile, view_to_dict
 from app.services.legal_references import REFERENCES
 from app.services.reasoning_engine import evaluate_account
 from app.services.redaction import Identity
-from app.utils.default_user import parse_uuid, resolve_user_id
+from app.utils.default_user import parse_uuid
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -62,9 +64,8 @@ async def _current_claims(db: AsyncSession, canonical_ids: list) -> dict:
 
 
 @router.get("/", response_model=list[dict[str, Any]])
-async def list_accounts(user_id: str = "default", db: AsyncSession = Depends(get_db)):
-    resolved = await resolve_user_id(db, user_id)
-    views = await load_profile(db, resolved)
+async def list_accounts(user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    views = await load_profile(db, user_id)
     claims = await _current_claims(db, [v.canonical.id for v in views])
     await db.commit()
     return [
@@ -73,11 +74,21 @@ async def list_accounts(user_id: str = "default", db: AsyncSession = Depends(get
     ]
 
 
-@router.get("/{account_id}", response_model=dict[str, Any])
-async def get_account(account_id: str, db: AsyncSession = Depends(get_db)):
+async def _owned_account(db: AsyncSession, account_id: str, user_id: uuid.UUID) -> AccountView:
+    """Load a canonical account only if it belongs to the caller. Another
+    user's account (or a nonexistent one) both return 404, so ownership is
+    never disclosed."""
     view = await load_account(db, parse_uuid(account_id, "account_id"))
-    if view is None:
+    if view is None or view.canonical.user_id != user_id:
         raise HTTPException(status_code=404, detail="Account not found")
+    return view
+
+
+@router.get("/{account_id}", response_model=dict[str, Any])
+async def get_account(
+    account_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
+):
+    view = await _owned_account(db, account_id, user_id)
     claims = await _current_claims(db, [view.canonical.id])
     cases = (await db.execute(
         select(Case).where(Case.canonical_account_id == view.canonical.id).order_by(Case.created_at.desc())
@@ -93,19 +104,20 @@ async def get_account(account_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{account_id}/evaluate", response_model=dict[str, Any])
-async def evaluate(account_id: str, db: AsyncSession = Depends(get_db)):
+async def evaluate(
+    account_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
     """Run the reasoning engine on this one account and store the result as
     its current evaluation — a grounded dispute basis or an explicit
     'no dispute ground'. Opens nothing; the consumer decides on cases."""
-    view = await load_account(db, parse_uuid(account_id, "account_id"))
-    if view is None:
-        raise HTTPException(status_code=404, detail="Account not found")
-    user_id = view.canonical.user_id
-    identity = Identity.from_sources(None, await db.get(User, user_id))
+    view = await _owned_account(db, account_id, user.id)
+    # Identity is used only to build the redaction set (never inserted into
+    # the prompt); it is the authenticated owner's own profile.
+    identity = Identity.from_sources(None, user)
     proposal = await evaluate_account(
-        view, context={"user_id": str(user_id), "canonical_account_id": account_id}, identity=identity,
+        view, context={"user_id": str(user.id), "canonical_account_id": account_id}, identity=identity,
     )
-    claim = await save_evaluation(db, user_id, view.canonical.id, proposal)
+    claim = await save_evaluation(db, user.id, view.canonical.id, proposal)
     await db.commit()
     result = await db.execute(select(Claim).where(Claim.id == claim.id).options(selectinload(Claim.evidence)))
     return {**claim_to_dict(result.scalar_one()), "validation_notes": proposal.validation_notes}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { AccountControl, authEnabled } from '../auth'
 import { ErrorBox, Loading, PageHeader, humanize, useAsync } from '../components/ui'
 
 const FIELDS = [
@@ -40,6 +41,15 @@ export default function Profile() {
   return (
     <div className="content">
       <PageHeader title="Profile" subtitle="Used only to identify you in dispute letters" />
+      {authEnabled && (
+        <div className="card account-card">
+          <div>
+            <div className="account-card-title">Account</div>
+            <div className="hint">Your sign-in and session</div>
+          </div>
+          <AccountControl />
+        </div>
+      )}
       {loading && !form && <Loading />}
       {error && <ErrorBox error={error} onRetry={reload} />}
       {form && (

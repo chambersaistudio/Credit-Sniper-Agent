@@ -47,6 +47,24 @@ class Settings(BaseSettings):
     admin_token: str = ""
     debug: bool = False
 
+    # ── Authentication ───────────────────────────────────────────
+    # "jwt"      — every data request must carry a bearer token that this
+    #              server verifies against the provider's JWKS. The identity
+    #              is the token's subject; the fixed local user is never used.
+    #              REQUIRED for any hosted/multi-user deployment.
+    # "disabled" — no auth; all requests resolve to one local user. Local
+    #              development and tests only. Never expose such a deployment
+    #              to the internet with real data on it.
+    auth_mode: str = "disabled"
+    # OIDC/JWKS verification inputs (from the managed auth provider, e.g.
+    # Clerk/Auth0). The JWKS URL and issuer are public, not secrets. Backend
+    # verification uses the provider's public keys, so no provider secret key
+    # is needed here at all.
+    auth_jwks_url: str = ""
+    auth_issuer: str = ""
+    # Optional. Set when the provider stamps an audience claim you want checked.
+    auth_audience: str = ""
+
     # CORS. Exact origins, comma-separated (kept as a plain string: pydantic-
     # settings would try to JSON-decode a List[str] env var). The regex is for
     # Vercel preview URLs, which change on every deployment.
@@ -73,6 +91,10 @@ class Settings(BaseSettings):
     @property
     def allowed_origins(self) -> List[str]:
         return [o.strip() for o in self.allowed_origins_raw.split(",") if o.strip()]
+
+    @property
+    def auth_enabled(self) -> bool:
+        return self.auth_mode == "jwt"
 
 
 settings = Settings()

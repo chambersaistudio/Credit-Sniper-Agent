@@ -5,6 +5,7 @@ Lifecycle actions map to explicit endpoints so each one can carry its own
 policy (e.g. approval requires a ready package). Submission in Phase 1.5 is
 a manual handoff: the consumer sends the package and records how and when.
 """
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.accounts import claim_to_dict
+from app.auth import current_user_id
 from app.database import get_db
 from app.models.canonical_account import AccountLink, CanonicalAccount
 from app.models.case import Case, Claim
@@ -28,7 +30,7 @@ from app.services.case_state_machine import (
 from app.services.dispute_package import build_package
 from app.services.package_pdf import render_package_pdf
 from app.services.storage import approved_package_key, get_storage
-from app.utils.default_user import parse_uuid, resolve_user_id
+from app.utils.default_user import parse_uuid
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -71,10 +73,13 @@ def _utc(value: datetime | None) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-async def _load_case(db: AsyncSession, case_id: str) -> Case:
+async def _load_case(db: AsyncSession, case_id: str, user_id: uuid.UUID) -> Case:
+    """Load a case only if it belongs to the caller. A case owned by someone
+    else returns the same 404 as a nonexistent one — changing the id in the
+    URL never reveals or reaches another user's case."""
     result = await db.execute(
         select(Case)
-        .where(Case.id == parse_uuid(case_id, "case_id"))
+        .where(Case.id == parse_uuid(case_id, "case_id"), Case.user_id == user_id)
         .options(
             selectinload(Case.claims).selectinload(Claim.evidence),
             selectinload(Case.events),
@@ -124,11 +129,18 @@ def _case_to_dict(case: Case, detail: bool = False) -> dict[str, Any]:
 
 
 @router.post("/", response_model=dict[str, Any])
-async def open_case(request: OpenCaseRequest, db: AsyncSession = Depends(get_db)):
+async def open_case(
+    request: OpenCaseRequest, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
+):
     if not request.claim_ids:
         raise HTTPException(status_code=422, detail="A case needs at least one claim")
     claim_uuids = [parse_uuid(c, "claim_id") for c in request.claim_ids]
-    claims = (await db.execute(select(Claim).where(Claim.id.in_(claim_uuids)))).scalars().all()
+    # Scope the lookup to the caller's own claims: a claim id belonging to
+    # someone else is simply not found, so a case can never be built on
+    # another user's evaluation.
+    claims = (
+        await db.execute(select(Claim).where(Claim.id.in_(claim_uuids), Claim.user_id == user_id))
+    ).scalars().all()
     if len(claims) != len(set(claim_uuids)):
         raise HTTPException(status_code=404, detail="Claim not found")
 
@@ -162,7 +174,7 @@ async def open_case(request: OpenCaseRequest, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=409, detail=f"There's already an open case for this account with {recipient_name}")
 
     case = Case(
-        user_id=canonical.user_id,
+        user_id=user_id,
         canonical_account_id=canonical.id,
         recipient_type=recipient_type,
         recipient_name=recipient_name,
@@ -175,14 +187,13 @@ async def open_case(request: OpenCaseRequest, db: AsyncSession = Depends(get_db)
     add_event(db, case, "created", to_status=CaseStatus.DRAFT.value,
               detail=f"Opened from {len(claims)} claim(s)", data={"claim_ids": request.claim_ids})
     await db.commit()
-    return _case_to_dict(await _load_case(db, str(case.id)), detail=True)
+    return _case_to_dict(await _load_case(db, str(case.id), user_id), detail=True)
 
 
 @router.get("/", response_model=list[dict[str, Any]])
-async def list_cases(user_id: str = "default", db: AsyncSession = Depends(get_db)):
-    resolved = await resolve_user_id(db, user_id)
+async def list_cases(user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Case).where(Case.user_id == resolved)
+        select(Case).where(Case.user_id == user_id)
         .options(selectinload(Case.canonical_account))
         .order_by(Case.updated_at.desc())
     )
@@ -191,13 +202,15 @@ async def list_cases(user_id: str = "default", db: AsyncSession = Depends(get_db
 
 
 @router.get("/{case_id}", response_model=dict[str, Any])
-async def get_case(case_id: str, db: AsyncSession = Depends(get_db)):
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+async def get_case(case_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.patch("/{case_id}/furnisher", response_model=dict[str, Any])
-async def set_furnisher_address(case_id: str, request: FurnisherUpdate, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def set_furnisher_address(
+    case_id: str, request: FurnisherUpdate, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
+):
+    case = await _load_case(db, case_id, user_id)
     if case.recipient_type != "furnisher":
         raise HTTPException(status_code=422, detail="Only furnisher cases take an address")
     if CaseStatus(case.status) not in (CaseStatus.DRAFT, CaseStatus.AWAITING_APPROVAL):
@@ -205,14 +218,14 @@ async def set_furnisher_address(case_id: str, request: FurnisherUpdate, db: Asyn
     case.recipient_address = request.furnisher_address.strip()
     add_event(db, case, "note", detail="Furnisher dispute address updated")
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.post("/{case_id}/package", response_model=dict[str, Any])
-async def generate_package(case_id: str, db: AsyncSession = Depends(get_db)):
+async def generate_package(case_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
     """(Re)build the dispute package from the case's claims and evidence and
     move the case to awaiting approval."""
-    case = await _load_case(db, case_id)
+    case = await _load_case(db, case_id, user_id)
     status = CaseStatus(case.status)
     if status == CaseStatus.AWAITING_APPROVAL:
         transition(db, case, CaseStatus.DRAFT, detail="Package regenerated")
@@ -233,12 +246,12 @@ async def generate_package(case_id: str, db: AsyncSession = Depends(get_db)):
     add_event(db, case, "package_generated", actor="system", data={"ready": case.package["ready"], "warnings": case.package["warnings"]})
     transition(db, case, CaseStatus.AWAITING_APPROVAL, actor="system", detail="Package ready for review")
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.get("/{case_id}/package.pdf")
-async def download_package(case_id: str, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def download_package(case_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    case = await _load_case(db, case_id, user_id)
     if not case.package:
         raise HTTPException(status_code=404, detail="No package generated yet")
     pdf = render_package_pdf(case.package)
@@ -247,8 +260,8 @@ async def download_package(case_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{case_id}/approve", response_model=dict[str, Any])
-async def approve(case_id: str, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def approve(case_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    case = await _load_case(db, case_id, user_id)
     if not case.package or not case.package.get("ready"):
         warnings = (case.package or {}).get("warnings") or ["Generate the package first."]
         raise HTTPException(status_code=409, detail="The package isn't ready to approve: " + " ".join(warnings))
@@ -258,12 +271,12 @@ async def approve(case_id: str, db: AsyncSession = Depends(get_db)):
     transition(db, case, CaseStatus.APPROVED, detail="Consumer approved the dispute package",
                data={"approved_package_key": case.approved_package_key})
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.post("/{case_id}/submitted", response_model=dict[str, Any])
-async def mark_submitted(case_id: str, request: SubmittedRequest, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def mark_submitted(case_id: str, request: SubmittedRequest, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    case = await _load_case(db, case_id, user_id)
     case.submitted_at = _utc(request.submitted_at)
     case.submission_channel = request.channel
     case.tracking_number = request.tracking_number
@@ -271,22 +284,22 @@ async def mark_submitted(case_id: str, request: SubmittedRequest, db: AsyncSessi
     transition(db, case, CaseStatus.SUBMITTED, detail=f"Sent via {request.channel.replace('_', ' ')}",
                data={"tracking_number": request.tracking_number})
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.post("/{case_id}/delivered", response_model=dict[str, Any])
-async def mark_delivered(case_id: str, request: DeliveredRequest, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def mark_delivered(case_id: str, request: DeliveredRequest, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    case = await _load_case(db, case_id, user_id)
     case.delivered_at = _utc(request.delivered_at)
     case.response_due_at, case.deadline_basis = compute_response_due(case.submitted_at, case.delivered_at, case.extended_investigation)
     transition(db, case, CaseStatus.DELIVERED, detail="Delivery confirmed; investigation clock running from receipt")
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.post("/{case_id}/response", response_model=dict[str, Any])
-async def record_response(case_id: str, request: ResponseRequest, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def record_response(case_id: str, request: ResponseRequest, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    case = await _load_case(db, case_id, user_id)
     if CaseStatus(case.status) not in AWAITING_RESPONSE | {CaseStatus.RESPONSE_RECEIVED}:
         raise HTTPException(status_code=409, detail="Record a response only after the dispute was sent")
     case.response_received_at = _utc(request.received_at)
@@ -295,12 +308,12 @@ async def record_response(case_id: str, request: ResponseRequest, db: AsyncSessi
         transition(db, case, CaseStatus.RESPONSE_RECEIVED, detail="Response received")
     transition(db, case, OUTCOMES[request.outcome], detail=request.detail or f"Outcome: {request.outcome.replace('_', ' ')}")
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)
 
 
 @router.post("/{case_id}/transition", response_model=dict[str, Any])
-async def move(case_id: str, request: TransitionRequest, db: AsyncSession = Depends(get_db)):
-    case = await _load_case(db, case_id)
+async def move(case_id: str, request: TransitionRequest, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    case = await _load_case(db, case_id, user_id)
     transition(db, case, CaseStatus(request.target), detail=request.detail or None)
     await db.commit()
-    return _case_to_dict(await _load_case(db, case_id), detail=True)
+    return _case_to_dict(await _load_case(db, case_id, user_id), detail=True)

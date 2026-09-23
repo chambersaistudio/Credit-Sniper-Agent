@@ -124,7 +124,7 @@ function actionsFor(c, { act, setSheet, busy }) {
       </>
     case 'approved':
       return <>
-        <a className="btn" href={api.packagePdfUrl(c.id)}>Download PDF</a>
+        <button className="btn" onClick={() => api.openPackagePdf(c.id)}>Download PDF</button>
         <button className="btn btn-primary" onClick={() => setSheet('sent')}>I sent it</button>
       </>
     case 'submitted':
@@ -173,7 +173,7 @@ function Package({ c }) {
           <summary className="small">What to enclose ({p.enclosures.length})</summary>
           <ul className="small" style={{ paddingLeft: 20 }}>{p.enclosures.map(e => <li key={e}>{e}</li>)}</ul>
         </details>
-        <a className="btn btn-sm" href={api.packagePdfUrl(c.id)}>Download PDF</a>
+        <button className="btn btn-sm" onClick={() => api.openPackagePdf(c.id)}>Download PDF</button>
       </div>
     </div>
   )

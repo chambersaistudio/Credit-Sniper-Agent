@@ -11,6 +11,10 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Stable subject id from the auth provider (e.g. Clerk's user id). Unique
+    # per real person; the tenant key every record hangs off. NULL only for
+    # the legacy local dev user, which exists when auth is disabled.
+    auth_subject = Column(String, unique=True, index=True)
     email = Column(String, unique=True, nullable=False, index=True)
     full_name = Column(String, nullable=False)
     address = Column(String)

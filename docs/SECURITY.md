@@ -4,25 +4,41 @@ Status as of Phase 1.5. Credit Sniper handles consumer financial data; this
 document records what is protected, what isn't yet, and what must happen
 before the app is exposed to anyone but its owner.
 
-## Blocker before any public deployment
+## Authentication and tenant isolation
 
-**There is no authentication.** Every API endpoint serves the single local
-user (`/api/users/me`, fixed id in `backend/app/utils/default_user.py`).
-Anyone who can reach the server can read the reports, accounts, and dispute
-letters stored on it. CORS restricts browsers, not attackers. Run it locally
-or behind a private network/VPN until real auth exists.
+**Authentication is enforced in hosted mode.** A managed provider (Clerk;
+any OIDC/JWKS issuer works) signs a short JWT for the signed-in user; the
+frontend sends it as `Authorization: Bearer …`. The backend
+(`backend/app/auth.py`) verifies it against the provider's **public** JWKS —
+signature (RS256), issuer, audience if configured, and expiry — so no
+provider secret and no password store live in this app. The token's stable
+`sub` claim maps to one `User` row (`users.auth_subject`, unique), created on
+first sign-in. A user id is **never** read from a query string, form field,
+or body — identity comes only from the verified token.
 
-The code is shaped for auth to drop in: every endpoint resolves the user
-through `resolve_user_id`, which becomes a dependency that reads the
-authenticated principal. Ownership checks on `/api/reports/{id}`,
-`/api/accounts/{id}` and `/api/cases/{id}` must be added at the same time —
-today they don't verify the record belongs to the caller.
+Two modes (`AUTH_MODE`):
+- `jwt` — required for any hosted/multi-user deployment; the above holds.
+- `disabled` — local dev/tests only: no token required, every request
+  resolves to one local user (`backend/app/utils/default_user.py`). The app
+  logs a loud warning at startup in this mode, and `/api/health/ready`
+  reports `"auth_mode"` so a deploy check can confirm `jwt` before real data
+  is uploaded. **Never expose a `disabled` deployment to the internet.**
+
+**Per-user isolation.** Every data route filters by the authenticated user,
+and every `/{id}` route verifies the record belongs to the caller. A record
+owned by someone else returns the same **404** as a nonexistent one, so a
+response never discloses that another user's record exists (no 403/404
+oracle). This is enforced for reports, report files, accounts, evaluations,
+claims, cases, packages, case actions, activity, and the dashboard.
+`tests/test_auth.py` proves cross-user reads and writes fail (IDOR/BOLA),
+that unauthenticated and invalid/expired tokens are rejected, and that the
+full lifecycle still works under auth.
 
 ## What's stored, and where
 
 | Data | Where | Protection today |
 |---|---|---|
-| Uploaded report PDFs | Document storage (`backend/app/services/storage.py`): a local directory, or a **private Cloudflare R2 bucket** (`STORAGE_BACKEND=r2`) | R2 encrypts at rest and the bucket has no public access; the app never issues public URLs. Keys are namespaced `users/<id>/…` so a user's files can be deleted by prefix. With local storage on a PaaS without a volume, files are lost on redeploy (extracted data stays in Postgres). |
+| Uploaded report PDFs | Document storage (`backend/app/services/storage.py`): a local directory, or a **private Cloudflare R2 bucket** (`STORAGE_BACKEND=r2`) | R2 encrypts at rest and the bucket has no public access. A stored file is reachable only through `GET /api/reports/{id}/file`, which first verifies the caller owns the report; on R2 it then returns a **120-second presigned URL** (the browser fetches the object directly — the R2 credentials never reach the client), on local disk it streams the bytes. No object is ever public. Keys are namespaced `users/<id>/…` so a user's files can be deleted by prefix. With local storage on a PaaS without a volume, files are lost on redeploy (extracted data stays in Postgres). |
 | Full report text | `credit_reports.raw_text` | Whatever at-rest encryption the database host provides — confirm Railway's current guarantees for its Postgres volumes before storing real reports; no field-level encryption yet. Report text includes addresses, date of birth, and masked account numbers. |
 | Parsed accounts and inquiries | `credit_accounts`, `credit_inquiries` | As above. Account numbers are stored as masked on the report. |
 | Profile | `users` | Name, address, email, phone, date of birth. **SSN: last four digits only**, validated server-side; the full SSN is never accepted or stored. |
@@ -33,17 +49,21 @@ today they don't verify the record belongs to the caller.
 Database connections to hosted Postgres use `ssl=require` — `postgres://…?sslmode=require`
 URLs are normalized for the async driver in `backend/app/config.py`.
 
-### Recommended before real users
+### Security limitations that remain (before other people's data)
 
-1. Authentication plus per-record ownership checks (above).
-2. Use `STORAGE_BACKEND=r2` (private bucket, scoped API token) in any hosted
+Done: authentication, per-record ownership/tenant isolation, and
+document access behind authorization (above). Still open:
+
+1. Use `STORAGE_BACKEND=r2` (private bucket, scoped API token) in any hosted
    environment instead of local disk.
-3. Application-level encryption for `credit_reports.raw_text`, `users.date_of_birth`
+2. Application-level encryption for `credit_reports.raw_text`, `users.date_of_birth`
    and `users.ssn_last_four` (envelope encryption with a KMS-managed key), so a
    database dump alone doesn't expose them.
-4. A retention policy and a "delete my data" endpoint that removes reports,
+3. A retention policy and a "delete my data" endpoint that removes reports,
    files, and derived records together.
-5. Rate limiting on upload and evaluation endpoints (evaluation spends money).
+4. Rate limiting on the upload and evaluation endpoints (evaluation spends
+   money). Not yet implemented; a per-user/IP limiter (e.g. slowapi, or a
+   gateway rule) is the intended home since these routes are authenticated.
 
 ## What the AI providers receive
 

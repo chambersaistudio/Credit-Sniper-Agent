@@ -290,3 +290,24 @@ details[open] > summary::after { content: '▴'; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ── Authentication ─────────────────────────────────────────── */
+.auth-screen {
+  min-height: 100dvh; display: grid; place-items: center; padding: 24px var(--gutter);
+  padding-bottom: calc(24px + var(--safe-bottom));
+  background: radial-gradient(120% 80% at 50% 0%, var(--bg-2) 0%, var(--bg-0) 70%);
+}
+.auth-card {
+  width: 100%; max-width: 400px; display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.brand-center { text-align: center; font-weight: 800; font-size: 22px; color: var(--text-0); }
+.brand-center small { display: block; font-weight: 500; font-size: 13px; color: var(--text-3); margin-top: 2px; }
+.auth-sub { color: var(--text-2); font-size: 14px; text-align: center; margin: 4px 0 12px; }
+/* Let Clerk's own card sit on the app's surface without a doubled frame. */
+.auth-clerk { width: 100%; display: flex; justify-content: center; }
+
+.account-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px;
+}
+.account-card-title { font-weight: 700; color: var(--text-0); }
+.account-control { display: flex; align-items: center; }

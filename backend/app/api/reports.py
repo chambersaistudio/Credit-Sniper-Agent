@@ -10,11 +10,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.auth import current_user, current_user_id
 from app.config import settings
 from app.database import get_db
 from app.models.credit_report import CreditAccount, CreditInquiry, CreditReport
@@ -26,7 +28,7 @@ from app.services.pdf_parser import parse_credit_report_pdf
 from app.services.redaction import Identity
 from app.services.storage import get_storage, report_key
 from app.utils.dates import parse_report_date
-from app.utils.default_user import parse_uuid, resolve_user_id
+from app.utils.default_user import parse_uuid
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -73,7 +75,7 @@ def _build_account(report_id: uuid.UUID, bureau: str, raw: dict[str, Any]) -> Cr
 async def upload_credit_report(
     file: UploadFile = File(...),
     bureau: str = Form(default="auto_detect"),
-    user_id: str = Form(default="default"),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     content = await file.read()
@@ -82,7 +84,7 @@ async def upload_credit_report(
     if len(content) > MAX_SIZE_BYTES:
         raise HTTPException(status_code=400, detail=f"File exceeds {settings.max_file_size_mb}MB limit")
 
-    resolved_user_id = await resolve_user_id(db, user_id)
+    resolved_user_id = user.id
 
     try:
         parsed = await run_in_threadpool(parse_credit_report_pdf, content)
@@ -107,7 +109,7 @@ async def upload_credit_report(
     parser_failed = len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
     if parser_failed:
         raw_accounts = []
-        identity = Identity.from_sources(parsed.get("personal_info"), await db.get(User, resolved_user_id))
+        identity = Identity.from_sources(parsed.get("personal_info"), user)
         try:
             extraction = await extract_with_ai(raw_text, identity, context={"user_id": str(resolved_user_id)})
             raw_accounts = extraction.accounts
@@ -187,24 +189,33 @@ def _warnings(method: str, dropped: int, account_count: int) -> list[str]:
 
 
 @router.get("/", response_model=list[dict[str, Any]])
-async def list_reports(user_id: str = "default", db: AsyncSession = Depends(get_db)):
-    resolved = await resolve_user_id(db, user_id)
+async def list_reports(user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(CreditReport).where(CreditReport.user_id == resolved).order_by(CreditReport.created_at.desc())
+        select(CreditReport).where(CreditReport.user_id == user_id).order_by(CreditReport.created_at.desc())
     )
     return [_report_summary(r) for r in result.scalars().all()]
 
 
-@router.get("/{report_id}", response_model=dict[str, Any])
-async def get_report(report_id: str, db: AsyncSession = Depends(get_db)):
+async def _owned_report(db: AsyncSession, report_id: str, user_id: uuid.UUID) -> CreditReport:
+    """Load a report only if it belongs to the caller. A report owned by
+    someone else returns the same 404 as one that doesn't exist, so the
+    response never reveals that another user's report exists."""
     result = await db.execute(
         select(CreditReport)
-        .where(CreditReport.id == parse_uuid(report_id, "report_id"))
+        .where(CreditReport.id == parse_uuid(report_id, "report_id"), CreditReport.user_id == user_id)
         .options(selectinload(CreditReport.accounts), selectinload(CreditReport.inquiries))
     )
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@router.get("/{report_id}", response_model=dict[str, Any])
+async def get_report(
+    report_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
+):
+    report = await _owned_report(db, report_id, user_id)
     return {
         **_report_summary(report),
         "accounts": [
@@ -216,6 +227,34 @@ async def get_report(report_id: str, db: AsyncSession = Depends(get_db)):
             for i in report.inquiries
         ],
     }
+
+
+@router.get("/{report_id}/file")
+async def download_report_file(
+    report_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
+):
+    """Return the stored original PDF — only after verifying the caller owns
+    the report. On R2 we hand back a short-lived presigned URL (the browser
+    fetches the object directly, and the credentials never leave the server);
+    on local disk we stream the bytes through the API. Either way the file is
+    private and reachable only through this authorized route."""
+    report = await _owned_report(db, report_id, user_id)
+    if not report.storage_key:
+        raise HTTPException(status_code=404, detail="No stored file for this report")
+    storage = get_storage()
+    signed = storage.signed_url(report.storage_key)
+    if signed is not None:
+        return RedirectResponse(url=signed, status_code=307)
+    try:
+        data = await storage.get(report.storage_key)
+    except Exception:
+        logger.exception("Reading stored report failed")
+        raise HTTPException(status_code=404, detail="No stored file for this report")
+    return Response(
+        data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="report-{report_id[:8]}.pdf"'},
+    )
 
 
 def _report_summary(report: CreditReport) -> dict[str, Any]:

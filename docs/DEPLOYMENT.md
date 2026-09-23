@@ -1,17 +1,26 @@
 # Staging deployment: Vercel (frontend) → Railway (API + Postgres) → Cloudflare R2
 
-**This is staging / personal-test infrastructure, not production.** There is
-no authentication: anyone with the API URL can read everything stored there.
-Don't upload real credit reports to a publicly reachable deployment until
-access control exists (see `docs/SECURITY.md`).
+**This is staging / personal-test infrastructure, not production.**
+Authentication is now enforced (Clerk-issued JWTs, verified server-side) and
+every record is scoped to its owner, so the app is safe for the owner to test
+with their own reports **once `AUTH_MODE=jwt` is set and verified**. It is not
+yet hardened for other people's data — see "Security limitations that remain"
+in `docs/SECURITY.md` (no field-level encryption, no rate limiting yet).
 
 ```
-iPhone ──HTTPS──▶ Vercel (static React build)
-   │
-   └──HTTPS (CORS)──▶ Railway "api" service (FastAPI, Dockerfile)
-                        ├── private network ──▶ Railway Postgres
-                        └── HTTPS (S3 API) ──▶ Cloudflare R2 bucket (private, optional)
+iPhone ──▶ Clerk (hosted sign-in) ──issues JWT──┐
+   │                                            │
+   └──HTTPS──▶ Vercel (static React build) ◀────┘
+        │
+        └──HTTPS (CORS, Bearer JWT)──▶ Railway "api" service (FastAPI, Dockerfile)
+                 │  verifies JWT against Clerk's public JWKS
+                 ├── private network ──▶ Railway Postgres
+                 └── HTTPS (S3 API) ──▶ Cloudflare R2 bucket (private, optional)
 ```
+
+The backend verifies tokens with Clerk's **public** keys, so the only auth
+value the frontend needs is Clerk's **publishable** key (browser-safe), and
+the backend needs **no** Clerk secret at all.
 
 ## Why the Vercel preview returned 500 and 404
 
@@ -33,6 +42,26 @@ Both were confirmed by reproduction, not assumed:
 Fix (this commit): the API no longer deploys to Vercel at all. `api/` is
 removed, `vercel.json` builds only the frontend and rewrites every non-asset
 path to `index.html`, and the frontend calls the API at `VITE_API_URL`.
+
+## 0. Clerk (authentication provider)
+
+We use [Clerk](https://clerk.com) as the managed auth provider: hosted
+sign-in/up, email verification and password recovery, sessions, and
+mobile/PWA support, with no password storage of our own. Any OIDC/JWKS
+issuer (Auth0, Cognito, …) works with the same backend — only these values
+change.
+
+1. Create a Clerk application. Enable the sign-in methods you want (email +
+   password and/or email code are enough to start).
+2. From the Clerk dashboard note:
+   - **Publishable key** (`pk_test_…` / `pk_live_…`) — public, goes in Vercel.
+   - **Frontend API URL** (e.g. `https://xxxx.clerk.accounts.dev`, or your
+     custom domain in production). This is the token **issuer**; the **JWKS
+     URL** is that same URL + `/.well-known/jwks.json`.
+3. Add your Vercel origin(s) to Clerk's allowed origins so sign-in loads there.
+
+No Clerk **secret** key is needed anywhere in this app — the backend verifies
+tokens with Clerk's public JWKS.
 
 ## 1. Railway: Postgres
 
@@ -64,6 +93,10 @@ service's **Settings**:
 | Variable | Value | Required |
 |---|---|---|
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (reference variable; the private URL) | yes |
+| `AUTH_MODE` | `jwt` — **required for any hosted deployment.** Leaving it `disabled` serves every user's data to anyone with the URL. | yes |
+| `AUTH_JWKS_URL` | `<Clerk Frontend API URL>/.well-known/jwks.json` | yes (with `jwt`) |
+| `AUTH_ISSUER` | `<Clerk Frontend API URL>` (e.g. `https://xxxx.clerk.accounts.dev`) | yes (with `jwt`) |
+| `AUTH_AUDIENCE` | leave empty unless you configured a custom audience claim | no |
 | `RUN_MIGRATIONS_ON_STARTUP` | `false` (the pre-deploy command migrates) | yes |
 | `ALLOWED_ORIGINS` | your Vercel production origin, e.g. `https://credit-sniper-agent.vercel.app` (no trailing slash) | yes |
 | `ALLOWED_ORIGIN_REGEX` | preview URLs, e.g. `^https://credit-sniper-agent-[a-z0-9-]+-<your-team-slug>\.vercel\.app$` (your team slug is the part before `.vercel.app` on preview URLs, ending in `-projects`) | if you use previews |
@@ -100,42 +133,66 @@ features land.
 
 1. Project → Settings → **General**: Root Directory = repository root (the
    repo's `vercel.json` builds `frontend/`). Framework preset: Other.
-2. Settings → **Environment Variables**: add `VITE_API_URL` =
-   `https://<your-railway-domain>` (no `/api`, no trailing slash) for
-   Production and Preview.
+2. Settings → **Environment Variables** (Production **and** Preview):
+   - `VITE_API_URL` = `https://<your-railway-domain>` (no `/api`, no trailing slash)
+   - `VITE_CLERK_PUBLISHABLE_KEY` = Clerk's publishable key (`pk_…`). This is
+     a public browser credential; leaving it unset makes the frontend run in
+     no-auth dev mode, which must never point at a hosted `jwt` backend.
 3. **Remove** any leftover variables from the old setup (`ANTHROPIC_API_KEY`,
    `POSTGRES_URL*`, `SECRET_KEY`, `ADMIN_TOKEN`). The frontend needs no
-   secrets, and nothing that isn't prefixed `VITE_` reaches the browser —
-   but there's no reason for keys to sit on Vercel at all.
-4. Redeploy. `VITE_API_URL` is baked in at build time, so changing it
+   secrets; nothing that isn't prefixed `VITE_` reaches the browser, and even
+   the `VITE_` values here are public by design.
+4. Redeploy. `VITE_*` values are baked in at build time, so changing either
    always needs a new deployment.
 
-## 5. Verify Vercel → Railway → Postgres
+## 5. Verify Vercel → Clerk → Railway → Postgres
 
 1. `https://<railway-domain>/api/health` → `{"status":"ok",…}`: the process is up.
 2. `https://<railway-domain>/api/health/ready` → `"database":"ok"`,
-   `"schema_revision":"0002"`, `"storage_backend"`, `"ai_configured":true`.
-   A 503 means `DATABASE_URL` or migrations are wrong; see the deploy logs.
-3. Open the Vercel URL on your phone. Home should say "Start with your credit
-   reports". An error box instead means the browser couldn't reach the API:
-   check `VITE_API_URL` (then redeploy) and `ALLOWED_ORIGINS` /
-   `ALLOWED_ORIGIN_REGEX` (they must match the exact origin in Safari's
-   address bar).
-4. Pull to refresh on `/reports`: it must reload, not 404.
-5. Upload a **synthetic** report (not a real one — see the warning at top),
-   confirm it appears under Reports → Accounts, and reload `/api/health/ready`.
+   `"schema_revision":"0003"`, `"storage_backend"`, `"ai_configured":true`,
+   **`"auth_mode":"jwt"`**. A 503 means `DATABASE_URL`/migrations are wrong.
+   If `auth_mode` is `disabled`, stop — the deployment is unprotected.
+3. `curl https://<railway-domain>/api/users/me` with no token → **401**. This
+   confirms auth is actually enforced (not just configured).
+4. Open the Vercel URL on your phone. You should get Clerk's **sign-in
+   screen**. Sign up / sign in; Home then loads. If sign-in doesn't appear,
+   check `VITE_CLERK_PUBLISHABLE_KEY` and that your Vercel origin is allowed
+   in Clerk. If Home shows an API error after sign-in, check `VITE_API_URL`,
+   `AUTH_ISSUER`/`AUTH_JWKS_URL`, and `ALLOWED_ORIGINS` / `ALLOWED_ORIGIN_REGEX`
+   (they must match the exact origin in Safari's address bar).
+5. Pull to refresh on `/reports`: it must reload, not 404.
+6. Upload a **synthetic** report first, confirm it appears under
+   Reports → Accounts. Optionally sign in as a second account and confirm it
+   sees none of the first account's data.
+
+## Checklist before uploading your first REAL report from your iPhone
+
+Do all of these against the **hosted** deployment (or use the local option
+below):
+
+- [ ] `GET /api/health/ready` shows `"auth_mode":"jwt"` and `"schema_revision":"0003"`.
+- [ ] `GET /api/users/me` with no token returns **401**.
+- [ ] The Vercel URL shows Clerk sign-in before any data screen.
+- [ ] You can sign in, and Home loads over HTTPS (lock icon in Safari).
+- [ ] `STORAGE_BACKEND=r2` with a **private** bucket (so PDFs persist and
+      stay private) — or accept that local storage loses PDFs on redeploy.
+- [ ] A second test account sees none of your data (quick IDOR sanity check).
+- [ ] You understand the remaining limits in `docs/SECURITY.md`
+      (no field-level DB encryption, no rate limiting yet). Only your own
+      data should be on this deployment.
 
 ## Local alternative (no public exposure)
 
-To try real reports before access control exists, keep everything on your
-own machine and network:
+To run entirely on your own machine and network — no Clerk, no internet
+exposure — keep `AUTH_MODE=disabled` (single local user) and omit the Clerk
+key:
 
 ```bash
 docker compose up db -d
 cd backend && pip install -r requirements.txt
 DATABASE_URL=postgresql://creditsniper:password@localhost:5432/creditsniper \
-ANTHROPIC_API_KEY=... uvicorn app.main:app --host 0.0.0.0 --port 8000
-cd frontend && npm ci && npm run dev -- --host
+AUTH_MODE=disabled ANTHROPIC_API_KEY=... uvicorn app.main:app --host 0.0.0.0 --port 8000
+cd frontend && npm ci && npm run dev -- --host   # no VITE_CLERK_PUBLISHABLE_KEY
 ```
 
 Then open `http://<your-computer's-LAN-IP>:5173` on an iPhone on the same

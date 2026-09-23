@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api'
+import { RequireAuth } from './auth'
 import Home from './pages/Home'
 import Reports from './pages/Reports'
 import UploadReport from './pages/UploadReport'
@@ -70,7 +71,9 @@ function Shell() {
 export default function App() {
   return (
     <BrowserRouter>
-      <Shell />
+      <RequireAuth>
+        <Shell />
+      </RequireAuth>
     </BrowserRouter>
   )
 }

@@ -30,21 +30,29 @@ add_usage_listener(persist_usage)
 async def lifespan(app: FastAPI):
     if settings.run_migrations_on_startup:
         await run_migrations()
+    if not settings.auth_enabled:
+        # Loud, because a hosted deployment in this mode serves every user's
+        # data to anyone who can reach it. Fine for local/dev only.
+        logger.warning(
+            "AUTH IS DISABLED (AUTH_MODE=%s): all requests resolve to one local user. "
+            "Do not expose this deployment to the internet with real data.",
+            settings.auth_mode,
+        )
     yield
 
 
 app = FastAPI(title="Credit Sniper", version=APP_VERSION, lifespan=lifespan)
 
-# No cookies or credentials cross origins (there's no auth yet), so
-# credentials stay off; origins are an explicit list plus an optional regex
-# for Vercel preview deployments.
+# Auth is a bearer token in the Authorization header (not a cookie), so
+# cross-origin credentials stay off. Origins are an explicit allow-list plus
+# an optional regex for Vercel preview deployments.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_origin_regex=settings.allowed_origin_regex or None,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Admin-Token"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
 )
 
 for module in (reports, accounts, cases, dashboard, users):
@@ -92,6 +100,9 @@ async def ready():
         "schema_revision": revision,
         "storage_backend": settings.storage_backend,
         "ai_configured": bool(settings.anthropic_api_key or settings.openai_api_key),
+        # Surfaced so the deploy check can confirm auth is on before real data
+        # is uploaded. "jwt" = enforced; "disabled" = single local user.
+        "auth_mode": settings.auth_mode,
     }
 
 

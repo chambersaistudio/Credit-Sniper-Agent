@@ -13,3 +13,4 @@ pdfplumber==0.11.4
 pypdf==5.1.0
 reportlab==5.0.1
 boto3==1.43.101
+PyJWT[crypto]==2.10.1

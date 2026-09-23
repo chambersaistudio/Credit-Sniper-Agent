@@ -1,4 +1,5 @@
 """Home and Activity screens: what the profile looks like and what's waiting on the consumer."""
+import uuid
 from collections import Counter
 from typing import Any
 
@@ -7,19 +8,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.auth import current_user_id
 from app.database import get_db
 from app.models.case import Case, CaseEvent, Claim
 from app.models.credit_report import CreditReport
 from app.services.case_state_machine import AWAITING_RESPONSE, NEEDS_USER, CaseStatus, is_overdue, next_action
 from app.services.credit_profile import load_profile
-from app.utils.default_user import resolve_user_id
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
 
 @router.get("/dashboard", response_model=dict[str, Any])
-async def dashboard(user_id: str = "default", db: AsyncSession = Depends(get_db)):
-    resolved = await resolve_user_id(db, user_id)
+async def dashboard(user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)):
+    resolved = user_id
 
     reports = (await db.execute(
         select(CreditReport).where(CreditReport.user_id == resolved).order_by(CreditReport.pull_date.desc())
@@ -78,8 +79,10 @@ async def dashboard(user_id: str = "default", db: AsyncSession = Depends(get_db)
 
 
 @router.get("/activity", response_model=list[dict[str, Any]])
-async def activity(user_id: str = "default", limit: int = 50, db: AsyncSession = Depends(get_db)):
-    resolved = await resolve_user_id(db, user_id)
+async def activity(
+    user_id: uuid.UUID = Depends(current_user_id), limit: int = 50, db: AsyncSession = Depends(get_db)
+):
+    resolved = user_id
     limit = max(1, min(limit, 200))
     events = (await db.execute(
         select(CaseEvent, Case)
