@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from typing import List
 import os
@@ -18,11 +19,7 @@ def _default_upload_dir() -> str:
     return "/tmp/uploads" if os.getenv("VERCEL") else "./uploads"
 
 
-def _default_origins() -> List[str]:
-    raw = os.getenv("ALLOWED_ORIGINS", "")
-    if raw:
-        return [o.strip() for o in raw.split(",") if o.strip()]
-    return ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
+DEFAULT_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8080"
 
 
 class Settings(BaseSettings):
@@ -31,11 +28,18 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "dev-secret-key-change-in-production"
     debug: bool = False
-    allowed_origins: List[str] = _default_origins()
+    # Kept as a plain comma-separated string (not List[str]): pydantic-settings
+    # tries to JSON-decode List[...] env vars, which crashes on the plain
+    # comma-separated format documented in .env.example.
+    allowed_origins_raw: str = Field(default=DEFAULT_ORIGINS, validation_alias="ALLOWED_ORIGINS")
     upload_dir: str = _default_upload_dir()
     max_file_size_mb: int = 50
 
-    model_config = {"env_file": ".env", "case_sensitive": False}
+    model_config = {"env_file": ".env", "case_sensitive": False, "populate_by_name": True}
+
+    @property
+    def allowed_origins(self) -> List[str]:
+        return [o.strip() for o in self.allowed_origins_raw.split(",") if o.strip()]
 
 
 settings = Settings()

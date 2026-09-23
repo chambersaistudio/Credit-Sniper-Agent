@@ -56,7 +56,7 @@ function ScoreGauge({ score, bureau, size = 120 }) {
         <text x={cx} y={cy - 4} textAnchor="middle" fill="white" fontSize="20" fontWeight="800" fontFamily="Inter, sans-serif">
           {score || '—'}
         </text>
-        <text x={cx} y={cy + 14} textAnchor="middle" fill={color} fontSize="9.5" fontWeight="700" fontFamily="Inter, sans-serif" textTransform="uppercase" letterSpacing="0.5">
+        <text x={cx} y={cy + 14} textAnchor="middle" fill={color} fontSize="9.5" fontWeight="700" fontFamily="Inter, sans-serif" letterSpacing="0.5" style={{ textTransform: 'uppercase' }}>
           {label}
         </text>
       </svg>

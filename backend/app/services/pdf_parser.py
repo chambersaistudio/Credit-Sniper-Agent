@@ -141,7 +141,7 @@ def _extract_personal_info(text: str) -> dict[str, str]:
     if name_match:
         info["name"] = name_match.group(1)
 
-    ssn_match = re.search(r"(?:ssn|social)[:\s]+[Xx*]+(\d{4})", text)
+    ssn_match = re.search(r"(?:ssn|social)[:\s]+[Xx*\-\s]+(\d{4})", text, re.IGNORECASE)
     if ssn_match:
         info["ssn_last_four"] = ssn_match.group(1)
 

@@ -24,6 +24,7 @@ from app.services.dispute_tracker import (
     is_safe_to_send_next_round,
 )
 from app.services.letter_generator import generate_letter, select_letter_type
+from app.utils.default_user import get_or_create_default_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/disputes", tags=["disputes"])
@@ -76,9 +77,14 @@ async def create_new_dispute(
     analysis_item = account.raw_data or {}
     letter_type = select_letter_type(analysis_item, round_number=1)
 
+    if request.user_id != "default":
+        resolved_user_id = uuid.UUID(request.user_id)
+    else:
+        resolved_user_id = (await get_or_create_default_user(db)).id
+
     dispute = await create_dispute(
         db=db,
-        user_id=uuid.UUID(request.user_id) if request.user_id != "default" else uuid.uuid4(),
+        user_id=resolved_user_id,
         account_id=uuid.UUID(request.account_id),
         bureau=request.bureau,
         strategy=letter_type,

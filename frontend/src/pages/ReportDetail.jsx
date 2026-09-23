@@ -21,10 +21,12 @@ export default function ReportDetail() {
   const handleCreateDispute = async (account) => {
     setCreating(account.id)
     try {
+      const userId = localStorage.getItem('userId')
       const data = await api.createDispute({
         account_id: account.id,
         bureau: report.bureau === 'tri_merge' ? 'equifax' : report.bureau,
         dispute_type: 'bureau_dispute',
+        ...(userId ? { user_id: userId } : {}),
       })
       setMessages(m => ({ ...m, [account.id]: { type: 'success', text: `Dispute created! Letter ready for review.` } }))
       setTimeout(() => navigate(`/disputes/${data.dispute_id}`), 1500)

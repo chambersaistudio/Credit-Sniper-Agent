@@ -18,6 +18,7 @@ from app.config import settings
 from app.models.credit_report import CreditReport, CreditAccount, CreditInquiry
 from app.services.pdf_parser import parse_credit_report_pdf
 from app.services.analysis_engine import analyze_credit_report
+from app.utils.default_user import get_or_create_default_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -78,8 +79,13 @@ async def upload_credit_report(
     if bureau != "auto_detect":
         detected_bureau = bureau
 
+    if user_id != "default":
+        resolved_user_id = uuid.UUID(user_id)
+    else:
+        resolved_user_id = (await get_or_create_default_user(db)).id
+
     report = CreditReport(
-        user_id=uuid.UUID(user_id) if user_id != "default" else uuid.uuid4(),
+        user_id=resolved_user_id,
         bureau=detected_bureau,
         credit_score=parsed.get("credit_score"),
         report_date=_parse_date(parsed.get("report_date")),

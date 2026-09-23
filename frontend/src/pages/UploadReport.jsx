@@ -37,6 +37,8 @@ export default function UploadReport() {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('bureau', bureau)
+    const userId = localStorage.getItem('userId')
+    if (userId) fd.append('user_id', userId)
     try {
       const data = await api.uploadReport(fd)
       setResult(data)
