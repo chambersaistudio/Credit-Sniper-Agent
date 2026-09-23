@@ -12,6 +12,15 @@ import pdfplumber
 
 logger = logging.getLogger(__name__)
 
+# Real bureau reports run tens of pages; anything far beyond is not a report
+# and would tie up a worker extracting text.
+MAX_PAGES = 150
+
+
+class ReportTooLarge(ValueError):
+    pass
+
+
 # Bureau detection patterns
 BUREAU_PATTERNS = {
     "equifax": re.compile(r"equifax", re.IGNORECASE),
@@ -58,10 +67,14 @@ def parse_credit_report_pdf(file_path: str) -> dict[str, Any]:
 
     try:
         with pdfplumber.open(file_path) as pdf:
+            if len(pdf.pages) > MAX_PAGES:
+                raise ReportTooLarge(f"Reports are limited to {MAX_PAGES} pages; this one has {len(pdf.pages)}.")
             for i, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
                 pages_text.append({"page": i + 1, "text": text})
                 full_text += text + "\n"
+    except ReportTooLarge:
+        raise
     except Exception as e:
         logger.error(f"pdfplumber failed: {e}, trying pypdf fallback")
         full_text = _pypdf_fallback(file_path)
@@ -89,6 +102,8 @@ def parse_credit_report_pdf(file_path: str) -> dict[str, Any]:
 def _pypdf_fallback(file_path: str) -> str:
     from pypdf import PdfReader
     reader = PdfReader(file_path)
+    if len(reader.pages) > MAX_PAGES:
+        raise ReportTooLarge(f"Reports are limited to {MAX_PAGES} pages; this one has {len(reader.pages)}.")
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
