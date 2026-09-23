@@ -22,22 +22,22 @@ today they don't verify the record belongs to the caller.
 
 | Data | Where | Protection today |
 |---|---|---|
-| Uploaded report PDFs | `UPLOAD_DIR` on local disk (`/tmp/uploads` on Vercel) | None beyond host disk encryption. Excluded from git. On Vercel `/tmp` is ephemeral, so the file is lost after the request — the extracted data survives in the database. |
-| Full report text | `credit_reports.raw_text` | Database at-rest encryption from the host (Neon/Vercel Postgres encrypt at rest); no field-level encryption. Report text includes addresses, date of birth, and masked account numbers. |
+| Uploaded report PDFs | Document storage (`backend/app/services/storage.py`): a local directory, or a **private Cloudflare R2 bucket** (`STORAGE_BACKEND=r2`) | R2 encrypts at rest and the bucket has no public access; the app never issues public URLs. Keys are namespaced `users/<id>/…` so a user's files can be deleted by prefix. With local storage on a PaaS without a volume, files are lost on redeploy (extracted data stays in Postgres). |
+| Full report text | `credit_reports.raw_text` | Whatever at-rest encryption the database host provides — confirm Railway's current guarantees for its Postgres volumes before storing real reports; no field-level encryption yet. Report text includes addresses, date of birth, and masked account numbers. |
 | Parsed accounts and inquiries | `credit_accounts`, `credit_inquiries` | As above. Account numbers are stored as masked on the report. |
 | Profile | `users` | Name, address, email, phone, date of birth. **SSN: last four digits only**, validated server-side; the full SSN is never accepted or stored. |
-| Dispute packages | `cases.package` (JSON) and generated PDFs (rendered on request, not stored) | As above. Letters print the SSN as `XXX-XX-1234`. |
+| Dispute packages | `cases.package` (JSON); on approval an immutable PDF of exactly what was approved goes to document storage | As above. Letters print the SSN as `XXX-XX-1234`. |
 | AI usage log | `ai_usage_log` | Tokens, cost, model, user/case ids. No prompts or model output. |
 
-**In transit:** TLS is provided by the host (Vercel) in front of the app.
+**In transit:** TLS terminates at Vercel (frontend) and Railway's edge (API). The API reaches Railway Postgres over Railway's private network.
 Database connections to hosted Postgres use `ssl=require` — `postgres://…?sslmode=require`
 URLs are normalized for the async driver in `backend/app/config.py`.
 
 ### Recommended before real users
 
 1. Authentication plus per-record ownership checks (above).
-2. Object storage for PDFs (S3/R2/GCS with server-side encryption and
-   private buckets) instead of local disk, which also fixes Vercel losing files.
+2. Use `STORAGE_BACKEND=r2` (private bucket, scoped API token) in any hosted
+   environment instead of local disk.
 3. Application-level encryption for `credit_reports.raw_text`, `users.date_of_birth`
    and `users.ssn_last_four` (envelope encryption with a KMS-managed key), so a
    database dump alone doesn't expose them.
@@ -47,22 +47,37 @@ URLs are normalized for the async driver in `backend/app/config.py`.
 
 ## What the AI providers receive
 
-AI is called through `backend/app/services/ai/` only.
+AI is called through `backend/app/services/ai/` only, and every piece of
+report content passes through deterministic redaction
+(`backend/app/services/redaction.py` — regex and string matching, no model)
+before it leaves the server.
 
-- **Account evaluation** (`reasoning_engine.py`) sends one account's bureau
-  records and its findings: creditor, masked account number, balances, dates,
-  statuses. It does **not** send the consumer's name, address, date of birth,
-  or SSN digits. A test asserts this on the prompt.
-- **Extraction fallback** (`ai_extraction.py`) sends the **full report text**
-  — including personal identifiers — but only when the rule-based parser
-  can't read a layout. Every extracted value is then checked against the
-  document, so the model can't introduce data.
-- Upload itself makes no AI call when the parser succeeds.
+- **Extraction fallback** (`ai_extraction.py`, only when the rule-based
+  parser can't read a layout): the report text is redacted first. Removed:
+  the consumer's name in the spellings reports use ("SMITH, JOHN M"), SSNs
+  (full and masked), date of birth, street addresses and PO boxes,
+  city/state/ZIP, phone numbers, email addresses, and labeled identity lines
+  (also-known-as, previous addresses, employer, driver's license…). Kept:
+  bureau, creditor/furnisher names, masked account numbers, balances,
+  statuses, account dates, payment history, remarks. Redaction uses both
+  patterns and the consumer's known identity (profile + report header).
+  Model output is then checked against the *redacted* text, and redaction
+  placeholders are rejected as values.
+- **Account evaluation** (`reasoning_engine.py`) sends one account's
+  tradeline fields and findings — never profile identity — and its free-text
+  values go through the same redaction.
+- Tests (`tests/test_redaction.py`, `tests/test_api_flow.py`) assert that
+  representative PII is absent from the exact request built for the provider
+  while the tradeline data is present.
 
-Provider-side retention follows each provider's API data policy. If a
-zero-retention arrangement is needed, note that some models (for example
-Claude Fable 5.1) require 30-day retention; the default tiers use models
-without that requirement.
+Known limits: an unmasked account number written as `123-456-7890` or
+`123-45-6789` is indistinguishable from a phone number or SSN and is
+redacted; a creditor's own street address and phone are removed too
+(extraction doesn't need them).
+
+Provider-side retention follows each provider's API data policy. Some models
+(for example Claude Fable 5.1) require 30-day retention; the default tiers
+don't use them.
 
 ## Secrets
 

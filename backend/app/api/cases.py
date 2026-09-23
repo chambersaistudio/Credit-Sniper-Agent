@@ -27,6 +27,7 @@ from app.services.case_state_machine import (
 )
 from app.services.dispute_package import build_package
 from app.services.package_pdf import render_package_pdf
+from app.services.storage import approved_package_key, get_storage
 from app.utils.default_user import parse_uuid, resolve_user_id
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
@@ -251,7 +252,11 @@ async def approve(case_id: str, db: AsyncSession = Depends(get_db)):
     if not case.package or not case.package.get("ready"):
         warnings = (case.package or {}).get("warnings") or ["Generate the package first."]
         raise HTTPException(status_code=409, detail="The package isn't ready to approve: " + " ".join(warnings))
-    transition(db, case, CaseStatus.APPROVED, detail="Consumer approved the dispute package")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    case.approved_package_key = approved_package_key(case.user_id, case.id, stamp)
+    await get_storage().put(case.approved_package_key, render_package_pdf(case.package), "application/pdf")
+    transition(db, case, CaseStatus.APPROVED, detail="Consumer approved the dispute package",
+               data={"approved_package_key": case.approved_package_key})
     await db.commit()
     return _case_to_dict(await _load_case(db, case_id), detail=True)
 

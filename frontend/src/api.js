@@ -1,4 +1,9 @@
-const BASE = '/api'
+// The API runs separately (Railway). VITE_API_URL is its public origin, e.g.
+// https://credit-sniper-api.up.railway.app — baked in at build time. It is
+// not a secret: no keys ever go in frontend env vars. Empty = same origin
+// (local dev, where Vite proxies /api to the backend).
+const API_ORIGIN = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
+const BASE = `${API_ORIGIN}/api`
 
 async function request(path, { method = 'GET', body, form } = {}) {
   const init = { method, headers: {} }

@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from typing import Any, Callable
 
 import pytest
@@ -12,6 +13,7 @@ TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 if TEST_DATABASE_URL:
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ.setdefault("DB_NULL_POOL", "1")
+os.environ.setdefault("UPLOAD_DIR", tempfile.mkdtemp(prefix="credit-sniper-test-"))
 
 from app.services.ai import clear_usage_listeners, register_provider  # noqa: E402
 from app.services.ai.config import TierConfig  # noqa: E402

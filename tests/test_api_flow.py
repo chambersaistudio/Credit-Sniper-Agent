@@ -65,6 +65,11 @@ Date of First Delinquency: 06/2018
 
 UNSTRUCTURED = """TRANSUNION personal credit report
 Report Date: February 1, 2024
+Report for: JANE Q CONSUMER
+Date of Birth: 07/04/1990
+SSN: 987-65-4321
+Current Address: 88 Birch Lane, Portland, OR 97201
+Phone: 503-555-0177
 Tradelines
 DISCOVER BANK   6011********7788   revolving   opened 04/2019   bal 1,250   pays as agreed
 """
@@ -119,8 +124,12 @@ def _responder(output_type, prompt, config):
 
 
 @pytest.fixture
-async def client(db_ready, fake_ai):
-    fake_ai(_responder)
+def ai(fake_ai):
+    return fake_ai(_responder)
+
+
+@pytest.fixture
+async def client(db_ready, ai):
     from app.main import app
     from app.services.usage_sink import persist_usage
 
@@ -238,8 +247,12 @@ async def test_no_dispute_ground_means_no_case(client):
     assert refused.status_code == 422
 
 
-async def test_ai_extraction_fallback_drops_ungrounded_values(client):
+async def test_ai_extraction_fallback_drops_ungrounded_values(client, ai):
     report = await _upload(client, UNSTRUCTURED, bureau="transunion")
+    extraction_prompt = next(c["prompt"] for c in ai.calls if c["output_type"] is ExtractedReport)
+    for pii in ("JANE Q CONSUMER", "07/04/1990", "987-65-4321", "88 Birch Lane", "Portland", "97201", "503-555-0177"):
+        assert pii not in extraction_prompt
+    assert "DISCOVER BANK" in extraction_prompt and "6011********7788" in extraction_prompt
     assert report["extraction_method"] == "ai_verified"
     assert report["total_accounts"] == 1  # the invented Wells Fargo account was dropped
     assert report["total_inquiries"] == 0  # the invented inquiry was dropped

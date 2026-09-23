@@ -19,6 +19,7 @@ from app.services.ai import ModelTier, generate
 from app.services.credit_profile import RECORD_FIELDS, AccountView
 from app.services.findings import Finding, Severity
 from app.services.legal_references import REFERENCES, catalog_for_prompt
+from app.services.redaction import Identity, redact
 
 # A proposed dispute ground below this confidence gets a second, deeper look.
 ESCALATION_CONFIDENCE = 0.5
@@ -83,11 +84,21 @@ class ClaimProposal:
     validation_notes: list[str] = field(default_factory=list)
 
 
-def build_prompt(view: AccountView, finding_ids: dict[str, Finding]) -> str:
-    records = [{k: r.get(k) for k in ("bureau", "as_of", *RECORD_FIELDS) if r.get(k) not in (None, "")} for r in view.records]
+def build_prompt(view: AccountView, finding_ids: dict[str, Finding], identity: Identity | None = None) -> str:
+    """Only this account's tradeline data. Free-text values pass through the
+    same deterministic redaction as extraction, in case a remark or a
+    misparsed field carries the consumer's identity."""
+
+    def clean(value):
+        return redact(value, identity).text if isinstance(value, str) else value
+
+    records = [
+        {k: clean(r.get(k)) for k in ("bureau", "as_of", *RECORD_FIELDS) if r.get(k) not in (None, "")}
+        for r in view.records
+    ]
     findings = [{"id": fid, **f.to_dict()} for fid, f in finding_ids.items()]
     return (
-        f"<account>\nCreditor: {view.canonical.creditor_name}\nType: {view.canonical.account_type or 'unknown'}\n</account>\n"
+        f"<account>\nCreditor: {clean(view.canonical.creditor_name)}\nType: {view.canonical.account_type or 'unknown'}\n</account>\n"
         f"<bureau_records>\n{json.dumps(records, indent=2, default=str)}\n</bureau_records>\n"
         f"<findings>\n{json.dumps(findings, indent=2) if findings else 'None — the rules found no issues.'}\n</findings>\n\n"
         "Is there a legitimate dispute ground for this account?"
@@ -137,9 +148,11 @@ def _needs_escalation(out: ClaimProposalOut, finding_ids: dict[str, Finding]) ->
     return strong and not out.has_dispute_ground
 
 
-async def evaluate_account(view: AccountView, context: dict[str, Any] | None = None) -> ClaimProposal:
+async def evaluate_account(
+    view: AccountView, context: dict[str, Any] | None = None, identity: Identity | None = None
+) -> ClaimProposal:
     finding_ids = {f"F{i}": f for i, f in enumerate(view.findings, start=1)}
-    prompt = build_prompt(view, finding_ids)
+    prompt = build_prompt(view, finding_ids, identity)
 
     tier = ModelTier.REASONING
     generation = await generate(

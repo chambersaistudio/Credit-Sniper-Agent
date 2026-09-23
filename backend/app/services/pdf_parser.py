@@ -4,7 +4,7 @@ Extracts accounts, inquiries, and personal info sections.
 """
 import re
 import logging
-from pathlib import Path
+from io import BytesIO
 from typing import Any
 from datetime import datetime
 
@@ -53,20 +53,13 @@ STATUS_MAP = {
 
 
 
-def parse_credit_report_pdf(file_path: str) -> dict[str, Any]:
-    """
-    Parse a credit report PDF and return structured data.
-    Returns raw text + structured sections for AI analysis.
-    """
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {file_path}")
-
+def parse_credit_report_pdf(content: bytes) -> dict[str, Any]:
+    """Parse a credit report PDF (raw bytes) into text plus structured sections."""
     full_text = ""
     pages_text = []
 
     try:
-        with pdfplumber.open(file_path) as pdf:
+        with pdfplumber.open(BytesIO(content)) as pdf:
             if len(pdf.pages) > MAX_PAGES:
                 raise ReportTooLarge(f"Reports are limited to {MAX_PAGES} pages; this one has {len(pdf.pages)}.")
             for i, page in enumerate(pdf.pages):
@@ -77,7 +70,7 @@ def parse_credit_report_pdf(file_path: str) -> dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"pdfplumber failed: {e}, trying pypdf fallback")
-        full_text = _pypdf_fallback(file_path)
+        full_text = _pypdf_fallback(content)
 
     bureau = _detect_bureau(full_text)
     credit_score = _extract_credit_score(full_text)
@@ -99,9 +92,9 @@ def parse_credit_report_pdf(file_path: str) -> dict[str, Any]:
     }
 
 
-def _pypdf_fallback(file_path: str) -> str:
+def _pypdf_fallback(content: bytes) -> str:
     from pypdf import PdfReader
-    reader = PdfReader(file_path)
+    reader = PdfReader(BytesIO(content))
     if len(reader.pages) > MAX_PAGES:
         raise ReportTooLarge(f"Reports are limited to {MAX_PAGES} pages; this one has {len(reader.pages)}.")
     return "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -160,15 +153,24 @@ def _extract_credit_score_multi(text: str) -> dict[str, int]:
 def _extract_personal_info(text: str) -> dict[str, str]:
     info = {}
 
-    name_match = re.search(r"(?:name|consumer)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)", text)
+    # Line-anchored so "Creditor Name:" never matches; any capitalization, since
+    # bureau PDFs usually print the consumer's name in capitals.
+    name_match = re.search(
+        r"(?im)^[ \t]*(?:consumer name|full name|name|report for|prepared for)[ \t]*:[ \t]*"
+        r"([A-Za-z][A-Za-z'.-]+(?:[ \t]+[A-Za-z][A-Za-z'.-]*){1,3})[ \t]*$",
+        text,
+    )
     if name_match:
-        info["name"] = name_match.group(1)
+        info["name"] = name_match.group(1).strip()
 
     ssn_match = re.search(r"(?:ssn|social)[:\s]+[Xx*\-\s]+(\d{4})", text, re.IGNORECASE)
     if ssn_match:
         info["ssn_last_four"] = ssn_match.group(1)
 
-    dob_match = re.search(r"(?:date of birth|dob|born)[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text, re.IGNORECASE)
+    dob_match = re.search(
+        r"(?:date of birth|birth date|dob|born)[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4})",
+        text, re.IGNORECASE,
+    )
     if dob_match:
         info["date_of_birth"] = dob_match.group(1)
 

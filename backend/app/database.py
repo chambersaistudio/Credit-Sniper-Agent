@@ -6,10 +6,9 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 from app.config import settings
 
-# Serverless functions don't persist between requests, so pooled connections
-# go stale; NullPool opens/closes per request (Neon/Vercel Postgres pool
-# externally). Tests use it too, since each test runs on its own event loop.
-_pool_kwargs = {"poolclass": NullPool} if (os.getenv("VERCEL") or os.getenv("DB_NULL_POOL")) else {}
+# Tests use NullPool, since each test runs on its own event loop. The API
+# itself runs as a long-lived server and keeps a normal connection pool.
+_pool_kwargs = {"poolclass": NullPool} if os.getenv("DB_NULL_POOL") else {"pool_pre_ping": True}
 
 engine = create_async_engine(settings.database_url, echo=settings.debug, **_pool_kwargs)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)

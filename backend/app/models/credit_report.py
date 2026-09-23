@@ -21,7 +21,7 @@ class CreditReport(Base):
     report_date = Column(DateTime(timezone=True))
     pull_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     source = Column(String, default="manual_upload")  # manual_upload | api_pull
-    file_path = Column(String)
+    storage_key = Column(String)  # original PDF in document storage (app/services/storage.py)
     raw_text = Column(Text)
     parsed_data = Column(JSON)  # parse metadata (extraction method, personal info), not a copy of the text
     credit_score = Column(Integer)

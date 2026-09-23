@@ -1,17 +1,26 @@
 """
 AI-assisted extraction fallback for report layouts the rule-based parser
-can't segment. The model must quote the source text for each account, and
-every extracted value is checked against the document: anything that
-doesn't literally appear there is dropped (left unknown) rather than
-trusted. The model structures what the report says; it never supplies facts.
+can't segment.
+
+Privacy: the report text is redacted deterministically (redaction.py)
+before it leaves the server — the provider never receives the consumer's
+name, SSN, date of birth, address, phone, or email.
+
+Accuracy: the model must quote the source for each account, and every
+extracted value is checked against the redacted text it was shown; anything
+that doesn't literally appear there, or that is a redaction placeholder, is
+dropped (left unknown). The model structures what the report says; it never
+supplies facts.
 """
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from app.services.ai import ModelTier, generate
 from app.services.pdf_parser import STATUS_MAP
+from app.services.redaction import Identity, redact
 
 SYSTEM_PROMPT = """You convert the text of a consumer credit report into structured data.
 Copy values exactly as they appear in the report. If a field isn't shown for an account, use null — \
@@ -56,7 +65,7 @@ def _squash(text: str) -> str:
 
 
 def _grounded(value: str | None, haystack: str) -> bool:
-    return bool(value) and _squash(value) in haystack
+    return bool(value) and "[redacted" not in value.lower() and _squash(value) in haystack
 
 
 def _money(value: str) -> float | None:
@@ -105,14 +114,28 @@ def verify_against_source(report: ExtractedReport, source_text: str) -> tuple[li
     return accounts, inquiries, dropped
 
 
-async def extract_with_ai(source_text: str, context: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+@dataclass
+class ExtractionResult:
+    accounts: list[dict[str, Any]]
+    inquiries: list[dict[str, Any]]
+    ungrounded_values_dropped: int
+    redactions: dict[str, int] = field(default_factory=dict)
+
+
+def build_prompt(redacted_text: str) -> str:
+    return f"<credit_report>\n{redacted_text}\n</credit_report>\n\nExtract every account and inquiry."
+
+
+async def extract_with_ai(source_text: str, identity: Identity, context: dict[str, Any]) -> ExtractionResult:
+    redaction = redact(source_text, identity)
     generation = await generate(
         ModelTier.FAST,
         system=SYSTEM_PROMPT,
-        prompt=f"<credit_report>\n{source_text}\n</credit_report>\n\nExtract every account and inquiry.",
+        prompt=build_prompt(redaction.text),
         output_type=ExtractedReport,
         task="extract_report",
-        context=context,
+        context={**context, "redactions": redaction.counts},
         max_tokens=32000,
     )
-    return verify_against_source(generation.output, source_text)
+    accounts, inquiries, dropped = verify_against_source(generation.output, redaction.text)
+    return ExtractionResult(accounts, inquiries, dropped, redaction.counts)

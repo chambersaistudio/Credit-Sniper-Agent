@@ -12,10 +12,12 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.case import Case, Claim
+from app.models.user import User
 from app.services.case_service import save_evaluation
 from app.services.credit_profile import load_account, load_profile, view_to_dict
 from app.services.legal_references import REFERENCES
 from app.services.reasoning_engine import evaluate_account
+from app.services.redaction import Identity
 from app.utils.default_user import parse_uuid, resolve_user_id
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -99,7 +101,10 @@ async def evaluate(account_id: str, db: AsyncSession = Depends(get_db)):
     if view is None:
         raise HTTPException(status_code=404, detail="Account not found")
     user_id = view.canonical.user_id
-    proposal = await evaluate_account(view, context={"user_id": str(user_id), "canonical_account_id": account_id})
+    identity = Identity.from_sources(None, await db.get(User, user_id))
+    proposal = await evaluate_account(
+        view, context={"user_id": str(user_id), "canonical_account_id": account_id}, identity=identity,
+    )
     claim = await save_evaluation(db, user_id, view.canonical.id, proposal)
     await db.commit()
     result = await db.execute(select(Claim).where(Claim.id == claim.id).options(selectinload(Claim.evidence)))

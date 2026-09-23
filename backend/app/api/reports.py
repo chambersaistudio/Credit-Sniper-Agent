@@ -5,12 +5,10 @@ when the layout defeats the parser — then links each tradeline to its
 cross-bureau canonical account. No dispute judgment happens here.
 """
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import aiofiles
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
@@ -20,10 +18,13 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database import get_db
 from app.models.credit_report import CreditAccount, CreditInquiry, CreditReport
+from app.models.user import User
 from app.services.account_matcher import link_accounts
 from app.services.ai import AIError
 from app.services.ai_extraction import extract_with_ai
 from app.services.pdf_parser import parse_credit_report_pdf
+from app.services.redaction import Identity
+from app.services.storage import get_storage, report_key
 from app.utils.dates import parse_report_date
 from app.utils.default_user import parse_uuid, resolve_user_id
 
@@ -83,25 +84,15 @@ async def upload_credit_report(
 
     resolved_user_id = await resolve_user_id(db, user_id)
 
-    os.makedirs(settings.upload_dir, exist_ok=True)
-    file_path = os.path.join(settings.upload_dir, f"{uuid.uuid4()}.pdf")
-    async with aiofiles.open(file_path, "wb") as f:
-        await f.write(content)
-
     try:
-        parsed = await run_in_threadpool(parse_credit_report_pdf, file_path)
-        chosen_bureau = _choose_bureau(bureau, parsed.get("bureau", "unknown"))
-    except HTTPException:
-        os.unlink(file_path)
-        raise
+        parsed = await run_in_threadpool(parse_credit_report_pdf, content)
     except Exception as e:
         logger.exception("PDF parse failed")
-        os.unlink(file_path)
         raise HTTPException(status_code=422, detail=f"Could not read this PDF: {e}")
+    chosen_bureau = _choose_bureau(bureau, parsed.get("bureau", "unknown"))
 
     raw_text: str = parsed.get("raw_text", "")
     if not raw_text.strip():
-        os.unlink(file_path)
         raise HTTPException(
             status_code=422,
             detail="This PDF has no readable text (it may be a scanned image). Download the report as a text PDF.",
@@ -111,15 +102,18 @@ async def upload_credit_report(
     raw_inquiries = parsed.get("inquiries_raw", [])
     extraction_method = "parser"
     ungrounded_values_dropped = 0
+    redactions: dict[str, int] = {}
 
     parser_failed = len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
     if parser_failed:
         raw_accounts = []
+        identity = Identity.from_sources(parsed.get("personal_info"), await db.get(User, resolved_user_id))
         try:
-            raw_accounts, ai_inquiries, ungrounded_values_dropped = await extract_with_ai(
-                raw_text, context={"user_id": str(resolved_user_id)}
-            )
-            raw_inquiries = raw_inquiries or ai_inquiries
+            extraction = await extract_with_ai(raw_text, identity, context={"user_id": str(resolved_user_id)})
+            raw_accounts = extraction.accounts
+            raw_inquiries = raw_inquiries or extraction.inquiries
+            ungrounded_values_dropped = extraction.ungrounded_values_dropped
+            redactions = extraction.redactions
             extraction_method = "ai_verified"
         except AIError as e:
             logger.warning("AI extraction fallback failed: %s", e)
@@ -131,17 +125,23 @@ async def upload_credit_report(
         credit_score=parsed.get("credit_score"),
         report_date=_to_datetime(parsed.get("report_date")),
         source="manual_upload",
-        file_path=file_path,
         raw_text=raw_text,
         parsed_data={
             "personal_info": parsed.get("personal_info", {}),
             "pages": parsed.get("pages"),
             "extraction_method": extraction_method,
             "ungrounded_values_dropped": ungrounded_values_dropped,
+            "redactions_before_ai": redactions,
         },
     )
     db.add(report)
     await db.flush()
+    report.storage_key = report_key(resolved_user_id, report.id)
+    try:
+        await get_storage().put(report.storage_key, content, "application/pdf")
+    except Exception:
+        logger.exception("Storing report PDF failed")
+        raise HTTPException(status_code=503, detail="Couldn't store the report file. Try again.")
 
     accounts = [_build_account(report.id, chosen_bureau, raw) for raw in raw_accounts]
     db.add_all(accounts)

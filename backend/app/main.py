@@ -7,10 +7,11 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from app.api import accounts, cases, dashboard, reports, users
 from app.config import settings
-from app.database import run_migrations
+from app.database import engine, run_migrations
 from app.services.ai import (
     AIConfigurationError, AIError, AIRefusalError, AIResponseError, add_usage_listener,
 )
@@ -22,25 +23,28 @@ logger = logging.getLogger(__name__)
 
 APP_VERSION = "1.5.0"
 
-# Registered at import (not in lifespan) because serverless deployments
-# don't run lifespan hooks.
 add_usage_listener(persist_usage)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await run_migrations()
+    if settings.run_migrations_on_startup:
+        await run_migrations()
     yield
 
 
 app = FastAPI(title="Credit Sniper", version=APP_VERSION, lifespan=lifespan)
 
+# No cookies or credentials cross origins (there's no auth yet), so
+# credentials stay off; origins are an explicit list plus an optional regex
+# for Vercel preview deployments.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=settings.allowed_origin_regex or None,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Admin-Token"],
 )
 
 for module in (reports, accounts, cases, dashboard, users):
@@ -66,13 +70,34 @@ async def _ai_error(request: Request, exc: AIError):
 
 @app.get("/api/health")
 async def health():
+    """Liveness: the process is up. Touches nothing else."""
     return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/api/health/ready")
+async def ready():
+    """Readiness: the API can reach Postgres and the schema is migrated.
+    Use this as the platform health check so a broken database fails the deploy."""
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            revision = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar()
+    except Exception as e:
+        logger.warning("Readiness check failed: %s", e)
+        return JSONResponse(status_code=503, content={"status": "unavailable", "database": "unreachable or not migrated"})
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "database": "ok",
+        "schema_revision": revision,
+        "storage_backend": settings.storage_backend,
+        "ai_configured": bool(settings.anthropic_api_key or settings.openai_api_key),
+    }
 
 
 @app.post("/api/migrate")
 async def migrate(x_admin_token: str | None = Header(default=None)):
-    """Serverless deployments don't run lifespan hooks: call once after each
-    deploy. Disabled unless ADMIN_TOKEN is configured, and requires it."""
+    """Manual migration trigger. Disabled unless ADMIN_TOKEN is configured, and requires it."""
     if not settings.admin_token or not secrets.compare_digest(x_admin_token or "", settings.admin_token):
         raise HTTPException(status_code=403, detail="Forbidden")
     await run_migrations()

@@ -90,6 +90,8 @@ class Case(Base):
     # Dispute package, generated from claims + evidence (see dispute_package.py).
     package = Column(JSON)
     package_generated_at = Column(DateTime(timezone=True))
+    # Immutable PDF of exactly what the consumer approved.
+    approved_package_key = Column(String)
 
     submission_channel = Column(String)  # manual_mail | certified_mail | portal | email | api
     tracking_number = Column(String)
