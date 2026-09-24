@@ -1,5 +1,6 @@
 import { useParams } from 'react-router-dom'
 import { api } from '../api'
+import PaymentHistory from '../components/PaymentHistory'
 import { ErrorBox, Loading, PageHeader, bureauName, humanize, money, shortDate, useAsync } from '../components/ui'
 
 const MONEY = new Set(['balance', 'past_due_amount', 'high_balance', 'credit_limit', 'original_amount', 'monthly_payment'])
@@ -66,7 +67,7 @@ export default function ReportDetail() {
                     <FieldRow key={k} name={k} value={MONEY.has(k) ? (v === null ? '—' : money(v)) : (v ?? '—')} />
                   ))}
                 </dl>
-                <PaymentHistory entries={a.payment_history} />
+                <TradelinePaymentHistory entries={a.payment_history} />
                 <Evidence pages={a.source_pages} evidence={a.field_evidence} />
               </details>
             ))}
@@ -117,18 +118,14 @@ const FieldRow = ({ name, value }) => (
   </>
 )
 
-function PaymentHistory({ entries }) {
+function TradelinePaymentHistory({ entries }) {
   if (!entries?.length) return null
   return (
     <div style={{ marginTop: 10 }}>
       <div className="label">Payment history</div>
-      <div className="grid-codes">
-        {entries.map((e, i) => (
-          <span key={i} className="code-cell" title={`${e.year}-${String(e.month).padStart(2, '0')}`}>
-            {e.raw_code}
-          </span>
-        ))}
-      </div>
+      {/* Same grid as the account view; dense here since this is the
+          source-document audit view, not the primary profile. */}
+      <PaymentHistory entries={entries} dense />
     </div>
   )
 }

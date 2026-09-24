@@ -26,6 +26,16 @@ RECORD_FIELDS = (
     "date_last_active", "remarks",
 )
 
+# Canonical fields the account UI shows but the reasoning engine does not see.
+# Deliberately separate from RECORD_FIELDS: that tuple defines the reasoning
+# prompt and the set of disputable fields, so adding display-only fields there
+# would change credit reasoning. These ride along on the record for the UI.
+DETAIL_FIELDS = (
+    "sold_to", "account_status_raw", "report_classification", "terms", "responsibility",
+    "consumer_dispute", "balance_updated_date", "date_status_updated",
+    "contact", "payment_history", "source_pages", "field_evidence",
+)
+
 
 @dataclass
 class AccountView:
@@ -52,6 +62,7 @@ def _as_of(link: AccountLink) -> date:
 def _record(link: AccountLink) -> dict[str, Any]:
     account = link.credit_account
     record = {name: getattr(account, name) for name in RECORD_FIELDS}
+    record.update({name: getattr(account, name) for name in DETAIL_FIELDS})
     record.update(
         bureau=link.bureau,
         credit_account_id=str(account.id),

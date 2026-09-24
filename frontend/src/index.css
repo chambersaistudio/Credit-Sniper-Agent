@@ -312,10 +312,38 @@ details[open] > summary::after { content: '▴'; }
 .account-card-title { font-weight: 700; color: var(--text-0); }
 .account-control { display: flex; align-items: center; }
 
-/* Payment-history grid: one cell per reported month, code as printed. */
-.grid-codes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-.code-cell {
-  min-width: 28px; padding: 2px 6px; border-radius: 6px; text-align: center;
-  background: var(--bg-3); border: 1px solid var(--border-subtle);
-  font-family: var(--font-mono); font-size: 11px; color: var(--text-2);
+/* ── Payment history ────────────────────────────────────────── */
+/* A year per row, Jan-Dec across. Horizontally scrollable on phones so the
+   month/year context is never lost to a reflow. */
+.ph-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 calc(var(--gutter) * -1); padding: 0 var(--gutter); }
+.ph-grid { border-collapse: separate; border-spacing: 3px; font-size: 11px; }
+.ph-grid th { font-weight: 600; color: var(--text-3); font-size: 10px; text-align: center; padding: 0 2px; }
+.ph-grid .ph-year, .ph-grid .ph-year-head {
+  position: sticky; left: 0; z-index: 1; background: var(--bg-1);
+  text-align: right; padding-right: 8px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.ph-cell {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 24px; padding: 0 4px; border-radius: 6px;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  border: 1px solid var(--border-subtle); background: var(--bg-3); color: var(--text-2);
+}
+.ph-green { background: var(--emerald-soft); border-color: rgba(16, 185, 129, 0.35); color: var(--emerald); }
+.ph-amber { background: var(--amber-soft); border-color: rgba(245, 158, 11, 0.35); color: var(--amber); }
+.ph-red { background: var(--rose-soft); border-color: rgba(244, 63, 94, 0.35); color: var(--rose); }
+.ph-neutral { background: var(--bg-3); color: var(--text-3); }
+/* Never reported: visibly empty, so it can't read as a missed payment. */
+.ph-empty { background: transparent; border-style: dashed; color: transparent; }
+
+.ph-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-3); }
+.ph-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+
+.badge.neutral { background: var(--bg-3); color: var(--text-2); }
+.seg-count {
+  display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 8px;
+  background: var(--bg-4); color: var(--text-3); font-size: 11px; line-height: 16px;
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
