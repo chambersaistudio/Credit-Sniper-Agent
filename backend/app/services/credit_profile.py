@@ -58,6 +58,10 @@ def _record(link: AccountLink) -> dict[str, Any]:
         report_id=str(account.report_id),
         as_of=_as_of(link).isoformat(),
         match_confidence=link.confidence,
+        # Not a RECORD_FIELD, so it never reaches an AI prompt — it gates
+        # whether this record may be reasoned about at all.
+        extraction_status=account.report.extraction_status if account.report else None,
+        original_creditor=account.original_creditor,
     )
     return record
 

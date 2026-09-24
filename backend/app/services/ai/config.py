@@ -21,6 +21,11 @@ class ModelTier(str, Enum):
     FAST = "fast"
     REASONING = "reasoning"
     ESCALATION = "escalation"
+    # Document understanding: the model reads the ORIGINAL PDF, not text we
+    # extracted for it. Two passes — an extractor and an independent auditor
+    # that re-reads the same document.
+    DOCUMENT_EXTRACTION = "document_extraction"
+    DOCUMENT_AUDIT = "document_audit"
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,12 @@ _DEFAULTS: dict[ModelTier, TierConfig] = {
     ModelTier.ESCALATION: TierConfig(
         provider="anthropic", model="claude-opus-5", effort="max", refusal_fallback=True, max_tokens=32000
     ),
+    # Vision-capable models that accept a PDF directly. Correctness is worth
+    # more than tokens here: a misread report poisons everything downstream.
+    # Both are env-overridable (AI_DOCUMENT_EXTRACTION_MODEL / _AUDIT_MODEL) —
+    # confirm the exact model id available to your OpenAI account.
+    ModelTier.DOCUMENT_EXTRACTION: TierConfig(provider="openai", model="gpt-5", max_tokens=32000),
+    ModelTier.DOCUMENT_AUDIT: TierConfig(provider="openai", model="gpt-5", max_tokens=16000),
 }
 
 

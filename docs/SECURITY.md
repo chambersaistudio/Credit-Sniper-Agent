@@ -67,8 +67,29 @@ document access behind authorization (above). Still open:
 
 ## What the AI providers receive
 
-AI is called through `backend/app/services/ai/` only, and every piece of
-report content passes through deterministic redaction
+AI is called through `backend/app/services/ai/` only.
+
+**Document understanding (ingestion).** The original uploaded PDF is sent,
+complete and unredacted, to the configured document provider (OpenAI
+Responses API). This is a deliberate, authorized trade: local text extraction
+misread a real Experian report before any model saw it, so the model must
+read the authoritative document. Controls on that path:
+
+- The original stays private in R2; there is no public object URL, and the
+  bytes handed to the provider are the ones read back from private storage.
+- `store=false` on every request and no Conversation object, so the provider
+  retains no copy of the report.
+- The PDF is sent inline as base64 in the request — not uploaded as a
+  persistent Files object — and is held in memory, not written to disk.
+- Nothing about the document is logged: not the bytes, the base64 payload,
+  the request body, or model inputs. Provider errors log status and message
+  only. `tests/test_document_extraction.py` asserts this.
+- API keys stay backend-only.
+- Optional privacy-preserving modes (redacted or zero-retention ingestion)
+  can be added later; they are deliberately absent here because a degraded
+  document produces a degraded reading.
+
+**Everything downstream** still passes through deterministic redaction
 (`backend/app/services/redaction.py` — regex and string matching, no model)
 before it leaves the server.
 

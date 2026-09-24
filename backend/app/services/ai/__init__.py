@@ -17,7 +17,12 @@ from app.services.ai.errors import (
     AIRefusalError,
     AIResponseError,
 )
-from app.services.ai.providers import get_provider, register_provider
+from app.services.ai.providers import (
+    DocumentUnsupported,
+    get_document_provider,
+    get_provider,
+    register_provider,
+)
 from app.services.ai.usage import UsageRecord, add_usage_listener, clear_usage_listeners, emit
 
 T = TypeVar("T", bound=BaseModel)
@@ -70,8 +75,58 @@ async def generate(
     return Generation(output=result.output, tier=tier, model=result.model)
 
 
+async def generate_document(
+    tier: ModelTier,
+    *,
+    system: str,
+    prompt: str,
+    document: bytes,
+    filename: str,
+    output_type: type[T],
+    task: str,
+    context: dict[str, Any] | None = None,
+    max_tokens: int | None = None,
+    detail: str | None = None,
+) -> Generation[T]:
+    """Send an ORIGINAL document (PDF bytes) to a document-capable provider.
+
+    The bytes are never logged and never transformed before the model reads
+    them — the whole point is that the model sees the real document rather
+    than text some local parser derived from it."""
+    config = resolve_tier(tier)
+    record = UsageRecord(
+        task=task, tier=tier.value, provider=config.provider, model=config.model,
+        success=False, context={**(context or {}), "document_bytes": len(document)},
+    )
+    try:
+        provider = get_document_provider(config.provider)
+        result = await provider.generate_document(
+            config, system=system, prompt=prompt, document=document, filename=filename,
+            output_type=output_type, max_tokens=max_tokens or config.max_tokens,
+            detail=detail or "high",
+        )
+    except AIError as e:
+        record.error = f"{type(e).__name__}: {e}"
+        await emit(record)
+        raise
+
+    record.success = True
+    record.model = result.model
+    record.input_tokens = result.input_tokens
+    record.output_tokens = result.output_tokens
+    record.cache_read_tokens = result.cache_read_tokens
+    record.cache_write_tokens = result.cache_write_tokens
+    record.latency_ms = result.latency_ms
+    record.estimated_cost_usd = estimate_cost_usd(
+        result.model, result.input_tokens, result.output_tokens, result.cache_read_tokens, result.cache_write_tokens
+    )
+    await emit(record)
+    return Generation(output=result.output, tier=tier, model=result.model)
+
+
 __all__ = [
     "AIConfigurationError", "AIError", "AIProviderError", "AIRefusalError", "AIResponseError",
-    "Generation", "ModelTier", "TierConfig", "UsageRecord",
-    "add_usage_listener", "clear_usage_listeners", "generate", "register_provider", "resolve_tier",
+    "DocumentUnsupported", "Generation", "ModelTier", "TierConfig", "UsageRecord",
+    "add_usage_listener", "clear_usage_listeners", "generate", "generate_document",
+    "get_document_provider", "register_provider", "resolve_tier",
 ]

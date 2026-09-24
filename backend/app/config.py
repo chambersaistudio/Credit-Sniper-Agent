@@ -37,6 +37,22 @@ class Settings(BaseSettings):
     ai_escalation_provider: str = ""
     ai_escalation_model: str = ""
     ai_escalation_effort: str = ""
+    ai_document_extraction_provider: str = ""
+    ai_document_extraction_model: str = ""
+    ai_document_extraction_effort: str = ""
+    ai_document_audit_provider: str = ""
+    ai_document_audit_model: str = ""
+    ai_document_audit_effort: str = ""
+
+    # AI-native document understanding: the extractor reads the ORIGINAL PDF.
+    # Empty = auto (on when a provider credential is configured). "off" keeps
+    # the deterministic parser, which can then never reach VERIFIED.
+    document_extraction_mode: str = ""
+    # How much rendering detail the provider gives each PDF page. Credit
+    # reports have small text, two-column grids and payment-history tables.
+    document_extraction_detail: str = "high"
+    # Run the independent second-pass auditor over the same original PDF.
+    document_audit_enabled: bool = True
 
     database_url: str = LOCAL_DATABASE_URL
     # Apply pending migrations when the app boots. Safe with one instance;
@@ -95,6 +111,16 @@ class Settings(BaseSettings):
     @property
     def auth_enabled(self) -> bool:
         return self.auth_mode == "jwt"
+
+    @property
+    def document_extraction_enabled(self) -> bool:
+        """AI-native ingestion is on unless explicitly disabled, and needs a
+        credential for the provider that serves the document tiers."""
+        if self.document_extraction_mode.lower() in ("off", "false", "0", "parser"):
+            return False
+        if self.document_extraction_mode.lower() in ("on", "true", "1", "ai"):
+            return True
+        return bool(self.openai_api_key)
 
 
 settings = Settings()

@@ -311,3 +311,11 @@ details[open] > summary::after { content: '▴'; }
 }
 .account-card-title { font-weight: 700; color: var(--text-0); }
 .account-control { display: flex; align-items: center; }
+
+/* Payment-history grid: one cell per reported month, code as printed. */
+.grid-codes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.code-cell {
+  min-width: 28px; padding: 2px 6px; border-radius: 6px; text-align: center;
+  background: var(--bg-3); border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-2);
+}

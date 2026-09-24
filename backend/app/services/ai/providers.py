@@ -44,6 +44,23 @@ class Provider(Protocol):
     ) -> ProviderResult[T]: ...
 
 
+class DocumentProvider(Protocol):
+    """A provider that reads an ORIGINAL document (PDF bytes) rather than
+    text we extracted for it. Implemented per vendor; the data model and the
+    calling code stay vendor-neutral."""
+
+    name: str
+
+    async def generate_document(
+        self, config: TierConfig, *, system: str, prompt: str, document: bytes, filename: str,
+        output_type: type[T], max_tokens: int, detail: str = "high",
+    ) -> ProviderResult[T]: ...
+
+
+class DocumentUnsupported(AIConfigurationError):
+    """Raised by providers that can't accept a raw document."""
+
+
 class AnthropicProvider:
     name = "anthropic"
 
@@ -169,6 +186,89 @@ class OpenAIProvider:
             latency_ms=latency_ms,
         )
 
+    def build_document_input(self, prompt: str, document: bytes, filename: str, detail: str) -> list[dict]:
+        """The Responses API input for one document + instruction.
+
+        The PDF is sent inline as base64 `file_data` rather than uploaded as a
+        persistent Files object, so nothing about the report outlives the
+        request. Kept separate from the call so the exact payload shape is
+        unit-testable without a network round trip."""
+        import base64
+
+        encoded = base64.b64encode(document).decode("ascii")
+        return [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_file",
+                    "filename": filename,
+                    "file_data": f"data:application/pdf;base64,{encoded}",
+                    "detail": detail,
+                },
+                {"type": "input_text", "text": prompt},
+            ],
+        }]
+
+    async def generate_document(
+        self, config, *, system, prompt, document, filename, output_type, max_tokens, detail="high"
+    ):
+        start = time.monotonic()
+        try:
+            response = await self._client.responses.parse(
+                model=config.model,
+                instructions=system,
+                input=self.build_document_input(prompt, document, filename, detail),
+                text_format=output_type,
+                max_output_tokens=max_tokens,
+                # Nothing is retained provider-side: no stored response and no
+                # Conversation object carrying the consumer's report.
+                store=False,
+            )
+        except self._openai.LengthFinishReasonError as e:
+            raise AIResponseError(f"Response truncated at max_output_tokens={max_tokens}") from e
+        except self._openai.AuthenticationError as e:
+            raise AIConfigurationError(f"OpenAI authentication failed: {e.message}") from e
+        except self._openai.APIStatusError as e:
+            # Deliberately only the status and the provider's own message —
+            # never the request body, which carries the report.
+            raise AIProviderError(f"OpenAI API error {e.status_code}: {e.message}") from e
+        except self._openai.APIConnectionError as e:
+            raise AIProviderError(f"Could not reach OpenAI API: {e}") from e
+        except self._openai.OpenAIError as e:
+            raise AIConfigurationError(f"OpenAI client error: {e}") from e
+        except ValidationError as e:
+            raise AIResponseError(f"Model output failed schema validation: {e}") from e
+        latency_ms = (time.monotonic() - start) * 1000
+
+        if getattr(response, "status", None) == "incomplete":
+            reason = getattr(getattr(response, "incomplete_details", None), "reason", "unknown")
+            raise AIResponseError(f"Document response incomplete: {reason}")
+        parsed = getattr(response, "output_parsed", None)
+        if parsed is None:
+            refusal = next(
+                (c.refusal for item in (response.output or []) for c in (getattr(item, "content", None) or [])
+                 if getattr(c, "type", None) == "refusal"),
+                None,
+            )
+            if refusal:
+                raise AIRefusalError(f"Model declined the document request: {refusal}")
+            raise AIResponseError("Model returned no structured output for the document")
+
+        usage = response.usage
+        cached = 0
+        if usage and getattr(usage, "input_tokens_details", None):
+            cached = getattr(usage.input_tokens_details, "cached_tokens", 0) or 0
+        return ProviderResult(
+            output=parsed,
+            provider=self.name,
+            model=response.model,
+            input_tokens=((usage.input_tokens or 0) - cached) if usage else 0,
+            output_tokens=(usage.output_tokens or 0) if usage else 0,
+            cache_read_tokens=cached,
+            cache_write_tokens=0,
+            latency_ms=latency_ms,
+        )
+
 
 _FACTORIES = {"anthropic": AnthropicProvider, "openai": OpenAIProvider}
 _instances: dict[str, Provider] = {}
@@ -188,3 +288,10 @@ def get_provider(name: str) -> Provider:
 def register_provider(name: str, provider: Provider) -> None:
     """Install a provider instance directly (tests, or a new vendor adapter)."""
     _instances[name] = provider
+
+
+def get_document_provider(name: str) -> DocumentProvider:
+    provider = get_provider(name)
+    if not hasattr(provider, "generate_document"):
+        raise DocumentUnsupported(f"Provider {name!r} cannot read documents directly")
+    return provider  # type: ignore[return-value]

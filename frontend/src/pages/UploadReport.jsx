@@ -41,9 +41,12 @@ export default function UploadReport() {
   }
 
   if (result) {
+    // Never present a clean "added" result for a report we couldn't read and
+    // verify — the state of the extraction leads.
+    const verified = result.extraction_status === 'verified'
     return (
       <div className="content">
-        <PageHeader title="Report added" back="/reports" />
+        <PageHeader title={verified ? 'Report added' : 'Report needs review'} back="/reports" />
         <div className="card stack">
           <div className="row-between">
             <div className="card-title">{bureauName(result.bureau)}</div>
@@ -53,12 +56,20 @@ export default function UploadReport() {
             <div className="stat"><div className="stat-label">Accounts read</div><div className="stat-value">{result.total_accounts}</div></div>
             <div className="stat"><div className="stat-label">Inquiries read</div><div className="stat-value">{result.total_inquiries}</div></div>
           </div>
+          {!verified && (
+            <div className="alert alert-error">
+              Your original PDF is stored safely, but it wasn't verified against the document, so dispute
+              analysis is on hold for this report.
+            </div>
+          )}
           {result.warnings.map(w => <div key={w} className="alert alert-warn">{w}</div>)}
           <p className="small muted">
             Each account is matched to the same account on your other bureaus' reports. Upload all three to compare them.
           </p>
-          <Link to="/reports?view=accounts" className="btn btn-primary btn-block">Review accounts</Link>
-          <Link to={`/reports/${result.report_id}`} className="btn btn-block">See exactly what was read</Link>
+          {verified && <Link to="/reports?view=accounts" className="btn btn-primary btn-block">Review accounts</Link>}
+          <Link to={`/reports/${result.report_id}`} className={`btn btn-block${verified ? '' : ' btn-primary'}`}>
+            See exactly what was read
+          </Link>
           <button className="btn btn-ghost btn-block" onClick={() => { setResult(null); setFile(null) }}>Upload another</button>
         </div>
       </div>

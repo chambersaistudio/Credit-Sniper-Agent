@@ -40,7 +40,7 @@ async def client(db_ready, ai):
         yield c
 
 
-async def _make_account(fields: dict) -> str:
+async def _make_account(fields: dict, extraction_status: str = "verified") -> str:
     """Insert one canonical account (owned by the local user) with a single
     bureau record carrying `fields`. Returns the canonical account id."""
     from app.database import async_session_maker
@@ -50,7 +50,8 @@ async def _make_account(fields: dict) -> str:
 
     async with async_session_maker() as s:
         user = await get_or_create_default_user(s)
-        report = CreditReport(user_id=user.id, bureau="experian", source="manual_upload", raw_text="x")
+        report = CreditReport(user_id=user.id, bureau="experian", source="manual_upload", raw_text="x",
+                              extraction_status=extraction_status)
         s.add(report)
         await s.flush()
         account = CreditAccount(report_id=report.id, bureau="experian", **fields)
@@ -77,11 +78,28 @@ async def test_name_only_account_blocks_evaluation(client, ai):
     assert ai.calls == []  # the reasoning engine was never invoked
 
 
-async def test_complete_account_is_evaluated(client, ai):
-    canonical_id = await _make_account({
-        "creditor_name": "CAINE & WEINER", "account_number": "88XXXX2211",
-        "account_status": "collection", "balance": 1204.0, "date_opened": "Feb 15, 2026",
-    })
+COMPLETE = {
+    "creditor_name": "CAINE & WEINER", "account_number": "88XXXX2211",
+    "account_status": "collection", "balance": 1204.0, "date_opened": "Feb 15, 2026",
+}
+
+
+async def test_complete_verified_account_is_evaluated(client, ai):
+    canonical_id = await _make_account(COMPLETE, extraction_status="verified")
     resp = await client.post(f"/api/accounts/{canonical_id}/evaluate")
     assert resp.status_code == 200, resp.text
-    assert len(ai.calls) >= 1  # a complete record does reach the reasoning engine
+    assert len(ai.calls) >= 1  # a complete, verified record reaches the reasoning engine
+
+
+@pytest.mark.parametrize("status", ["extraction_incomplete", "needs_audit", "failed"])
+async def test_unverified_report_blocks_evaluation(client, ai, status):
+    """Even a fully populated record is not evaluated while its report hasn't
+    been verified against the original document."""
+    canonical_id = await _make_account(COMPLETE, extraction_status=status)
+    resp = await client.post(f"/api/accounts/{canonical_id}/evaluate")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["recommended_action"] == "need_more_evidence"
+    assert body["has_dispute_ground"] is False
+    assert "not been verified" in body["reasoning"]
+    assert ai.calls == []

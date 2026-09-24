@@ -3,39 +3,73 @@ import { api } from '../api'
 import { ErrorBox, Loading, PageHeader, bureauName, humanize, money, shortDate, useAsync } from '../components/ui'
 
 const MONEY = new Set(['balance', 'past_due_amount', 'high_balance', 'credit_limit', 'original_amount', 'monthly_payment'])
-const SKIP = new Set(['id', 'creditor_name'])
+// Rendered on their own, not as plain rows.
+const SKIP = new Set(['id', 'creditor_name', 'payment_history', 'field_evidence', 'source_pages', 'contact'])
+
+// What the extraction state means for the consumer, and whether this report
+// can be used for dispute analysis at all.
+const STATUS = {
+  verified: ['ok', 'Verified against your original PDF', 'Two independent passes read your uploaded document and agreed.'],
+  needs_audit: ['warn', 'Not verified', 'The review pass disagreed with the first reading, so this report is on hold for dispute analysis. Nothing was auto-corrected.'],
+  extraction_incomplete: ['error', 'Incomplete', "Your document wasn't read completely, so this report can't be used for dispute analysis yet."],
+  failed: ['error', 'Could not be read', 'Your original PDF is stored safely, but nothing could be extracted from it.'],
+}
 
 export default function ReportDetail() {
   const { id } = useParams()
   const { data, error, loading, reload } = useAsync(() => api.getReport(id), [id])
+  const [tone, title, detail] = (data && STATUS[data.extraction_status]) || []
+
   return (
     <div className="content">
-      <PageHeader title={data ? `${bureauName(data.bureau)} report` : 'Report'} subtitle={data && `Report date ${shortDate(data.report_date || data.pull_date)}`} back="/reports?view=uploads" />
+      <PageHeader
+        title={data ? `${bureauName(data.bureau)} report` : 'Report'}
+        subtitle={data && `Report date ${shortDate(data.report_date || data.pull_date)}`}
+        back="/reports?view=uploads"
+      />
       {loading && !data && <Loading />}
       {error && <ErrorBox error={error} onRetry={reload} />}
       {data && (
         <>
-          {data.extraction_method === 'ai_verified' && (
-            <div className="alert alert-warn" style={{ marginBottom: 12 }}>
-              This layout wasn't recognized, so AI read it and every value was checked against the document text. Compare with your PDF.
+          {title && (
+            <div className={`alert alert-${tone}`} style={{ marginBottom: 12 }}>
+              <strong>{title}.</strong> {detail}
+              {data.extraction_reasons?.length > 0 && (
+                <ul className="small" style={{ margin: '6px 0 0 16px' }}>
+                  {data.extraction_reasons.map((r, i) => <li key={i}>{r}</li>)}
+                </ul>
+              )}
             </div>
           )}
+          {data.score_type && data.credit_score != null && (
+            <div className="card row-between" style={{ marginBottom: 12 }}>
+              <span>{data.score_type}</span><strong>{data.credit_score}</strong>
+            </div>
+          )}
+
           <p className="small muted" style={{ marginBottom: 12 }}>
-            Exactly what was read from this file. Blank means the report didn't show it — nothing is filled in or guessed.
+            Exactly what was read from your file. Blank means the report didn't show it — nothing is filled in or guessed.
           </p>
+
           <div className="section-title">Accounts ({data.accounts.length})</div>
           <div className="list">
             {data.accounts.map(a => (
               <details key={a.id} className="card">
-                <summary>{a.creditor_name || 'Unnamed account'}</summary>
+                <summary>
+                  {a.creditor_name || 'Unnamed account'}
+                  {a.original_creditor && <span className="small muted"> · orig. {a.original_creditor}</span>}
+                </summary>
                 <dl className="compare" style={{ '--cols': 1 }}>
                   {Object.entries(a).filter(([k]) => !SKIP.has(k)).map(([k, v]) => (
                     <FieldRow key={k} name={k} value={MONEY.has(k) ? (v === null ? '—' : money(v)) : (v ?? '—')} />
                   ))}
                 </dl>
+                <PaymentHistory entries={a.payment_history} />
+                <Evidence pages={a.source_pages} evidence={a.field_evidence} />
               </details>
             ))}
           </div>
+
           <div className="section">
             <div className="section-title">Inquiries ({data.inquiries.length})</div>
             <div className="list">
@@ -47,6 +81,27 @@ export default function ReportDetail() {
               ))}
             </div>
           </div>
+
+          {data.audit_findings?.length > 0 && (
+            <div className="section">
+              <div className="section-title">Review findings ({data.audit_findings.length})</div>
+              <p className="small muted">What the second pass disagreed with. These are recorded, never applied automatically.</p>
+              <div className="list">
+                {data.audit_findings.map((f, i) => (
+                  <div key={i} className="card">
+                    <div className="card-title">{humanize(f.kind)}{f.account_name ? ` · ${f.account_name}` : ''}</div>
+                    <div className="small">{f.explanation}</div>
+                    {f.field && (
+                      <div className="small muted">
+                        {humanize(f.field)}: read “{f.extracted_value ?? '—'}”, document shows “{f.correct_value ?? '—'}”
+                        {f.page ? ` (page ${f.page})` : ''}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -59,3 +114,34 @@ const FieldRow = ({ name, value }) => (
     <dd>{String(value)}</dd>
   </>
 )
+
+function PaymentHistory({ entries }) {
+  if (!entries?.length) return null
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="label">Payment history</div>
+      <div className="grid-codes">
+        {entries.map((e, i) => (
+          <span key={i} className="code-cell" title={`${e.year}-${String(e.month).padStart(2, '0')}`}>
+            {e.raw_code}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function Evidence({ pages, evidence }) {
+  if (!pages?.length && !evidence?.length) return null
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="label">Where this came from</div>
+      {pages?.length > 0 && <div className="small muted">Page{pages.length > 1 ? 's' : ''} {pages.join(', ')}</div>}
+      {evidence?.map((e, i) => (
+        <div key={i} className="small muted">
+          {humanize(e.field)}: “{e.excerpt}”{e.page ? ` (p. ${e.page})` : ''}
+        </div>
+      ))}
+    </div>
+  )
+}

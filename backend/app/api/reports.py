@@ -6,6 +6,8 @@ cross-bureau canonical account. No dispute judgment happens here.
 """
 import logging
 import uuid
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,6 +26,8 @@ from app.models.user import User
 from app.services.account_matcher import link_accounts
 from app.services.ai import AIError
 from app.services.ai_extraction import extract_with_ai
+from app.services.document_extraction import ExtractionStatus, extract_document
+from app.services.document_extraction.mapping import account_row, inquiry_rows, public_records
 from app.services.extraction_quality import assess_accounts, inquiry_is_suspicious
 from app.services.pdf_parser import parse_credit_report_pdf
 from app.services.redaction import Identity
@@ -39,13 +43,16 @@ MAX_SIZE_BYTES = settings.max_file_size_mb * 1024 * 1024
 PDF_MAGIC = b"%PDF-"
 
 _ACCOUNT_COLUMNS = (
-    "creditor_name", "account_number", "account_type", "account_status", "payment_status",
+    "creditor_name", "original_creditor", "sold_to", "account_number", "account_type",
+    "account_status", "account_status_raw", "payment_status",
     "balance", "past_due_amount", "high_balance", "credit_limit", "original_amount", "monthly_payment",
+    "terms", "responsibility", "consumer_dispute",
     "date_opened", "date_closed", "date_of_first_delinquency", "date_last_reported",
-    "date_last_payment", "date_last_active", "remarks",
+    "date_last_payment", "date_last_active", "date_status_updated", "remarks",
+    "payment_history", "contact", "source_pages", "field_evidence",
 )
 # Parser fields kept only in raw_data for traceability (no dedicated column).
-_RAW_ONLY = ("raw_block", "account_status_raw", "original_creditor", "extraction_method")
+_RAW_ONLY = ("raw_block", "extraction_method")
 
 
 def _choose_bureau(requested: str, detected: str) -> str:
@@ -64,11 +71,143 @@ def _choose_bureau(requested: str, detected: str) -> str:
 
 
 def _build_account(report_id: uuid.UUID, bureau: str, raw: dict[str, Any]) -> CreditAccount:
+    raw_data = {**(raw.get("raw_data") or {}), **{key: raw[key] for key in _RAW_ONLY if key in raw}}
     return CreditAccount(
         report_id=report_id,
         bureau=bureau,
-        raw_data={key: raw[key] for key in _RAW_ONLY if key in raw},
+        raw_data=raw_data or None,
         **{column: raw.get(column) for column in _ACCOUNT_COLUMNS},
+    )
+
+
+@dataclass
+class IngestOutcome:
+    """What one ingestion strategy produced, before it is written to the DB."""
+
+    accounts: list[dict[str, Any]]
+    inquiries: list[dict[str, Any]]
+    quality: Any
+    status: ExtractionStatus
+    method: str
+    bureau: str = "unknown"
+    credit_score: int | None = None
+    score_type: str | None = None
+    report_date: str | None = None
+    reasons: list[str] = dataclass_field(default_factory=list)
+    audit: dict[str, Any] | None = None
+    public_records: list[dict[str, Any]] | None = None
+    cross_check: dict[str, Any] | None = None
+    ungrounded_values_dropped: int = 0
+    redactions: dict[str, int] = dataclass_field(default_factory=dict)
+
+
+def _cross_check(parsed: dict[str, Any], account_count: int) -> dict[str, Any]:
+    """The deterministic parser as a second opinion only. It records whether
+    it saw the same number of tradelines; a mismatch is information, not a
+    decision — the parser never overrides the document model."""
+    parser_accounts = [
+        a for a in parsed.get("accounts_raw", [])
+        if a.get("extraction_method") != "full_text_ai_parse"
+    ]
+    parser_quality = assess_accounts(parser_accounts)
+    return {
+        "parser_accounts": len(parser_accounts),
+        "document_accounts": account_count,
+        "agrees_on_count": len(parser_accounts) == account_count,
+        "parser_complete": parser_quality.complete,
+    }
+
+
+async def _ingest_with_document_model(
+    document: bytes, parsed: dict[str, Any], requested_bureau: str, user_id: uuid.UUID
+) -> IngestOutcome:
+    """Authoritative path: a vision model reads the ORIGINAL PDF, a second
+    pass audits that reading against the same PDF, and a deterministic gate
+    decides whether the result may be relied on."""
+    result = await extract_document(document, context={"user_id": str(user_id)})
+    if result.extraction is None:
+        return IngestOutcome(
+            accounts=[], inquiries=[], quality=assess_accounts([]), status=result.status,
+            method="document_failed", reasons=result.reasons, audit=result.audit_to_dict(),
+            bureau=parsed.get("bureau", "unknown"),
+        )
+
+    extraction = result.extraction
+    accounts = [account_row(t) for t in extraction.accounts]
+    quality = assess_accounts(accounts)
+    status, reasons = result.status, list(result.reasons)
+    # The document passes cleanly but the rows still don't look like
+    # tradelines: hold it back rather than call it verified.
+    if status is ExtractionStatus.VERIFIED and not quality.complete:
+        status = ExtractionStatus.EXTRACTION_INCOMPLETE
+        reasons += quality.reasons
+
+    return IngestOutcome(
+        accounts=accounts,
+        inquiries=inquiry_rows(extraction),
+        quality=quality,
+        status=status,
+        method="ai_document",
+        bureau=(extraction.bureau or parsed.get("bureau", "unknown") or "unknown").strip().lower(),
+        credit_score=extraction.score if extraction.score is None or 300 <= extraction.score <= 850 else None,
+        score_type=extraction.score_type,
+        report_date=extraction.report_date or parsed.get("report_date"),
+        reasons=reasons,
+        audit=result.audit_to_dict(),
+        public_records=public_records(extraction),
+        cross_check=_cross_check(parsed, len(accounts)),
+    )
+
+
+async def _ingest_with_parser(
+    parsed: dict[str, Any], raw_text: str, user: User, user_id: uuid.UUID
+) -> IngestOutcome:
+    """Fallback path when no document-understanding provider is configured.
+
+    The deterministic parser (plus the older source-grounded text fallback)
+    still runs, but it only reaches VERIFIED when the completeness gate
+    passes — never merely because it returned some rows."""
+    raw_accounts = parsed.get("accounts_raw", [])
+    raw_inquiries = parsed.get("inquiries_raw", [])
+    method = "parser"
+    dropped = 0
+    redactions: dict[str, int] = {}
+
+    sentinel = len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
+    if sentinel:
+        raw_accounts = []
+    quality = assess_accounts(raw_accounts)
+
+    if not quality.complete:
+        identity = Identity.from_sources(parsed.get("personal_info"), user)
+        try:
+            extraction = await extract_with_ai(raw_text, identity, context={"user_id": str(user_id)})
+            ai_quality = assess_accounts(extraction.accounts)
+            if sentinel or ai_quality.substantial >= quality.substantial:
+                raw_accounts = extraction.accounts
+                raw_inquiries = extraction.inquiries or raw_inquiries
+                dropped = extraction.ungrounded_values_dropped
+                redactions = extraction.redactions
+                quality = ai_quality
+                method = "ai_verified" if ai_quality.complete else "ai_incomplete"
+            else:
+                method = "parser_incomplete"
+        except AIError as e:
+            logger.warning("AI extraction fallback failed: %s", e)
+            method = "failed" if not raw_accounts else "parser_incomplete"
+
+    if not raw_accounts:
+        status = ExtractionStatus.FAILED
+    elif quality.complete:
+        status = ExtractionStatus.VERIFIED
+    else:
+        status = ExtractionStatus.EXTRACTION_INCOMPLETE
+
+    return IngestOutcome(
+        accounts=raw_accounts, inquiries=raw_inquiries, quality=quality, status=status, method=method,
+        bureau=parsed.get("bureau", "unknown"), credit_score=parsed.get("credit_score"),
+        report_date=parsed.get("report_date"), reasons=quality.reasons,
+        ungrounded_values_dropped=dropped, redactions=redactions,
     )
 
 
@@ -92,7 +231,6 @@ async def upload_credit_report(
     except Exception as e:
         logger.exception("PDF parse failed")
         raise HTTPException(status_code=422, detail=f"Could not read this PDF: {e}")
-    chosen_bureau = _choose_bureau(bureau, parsed.get("bureau", "unknown"))
 
     raw_text: str = parsed.get("raw_text", "")
     if not raw_text.strip():
@@ -101,66 +239,54 @@ async def upload_credit_report(
             detail="This PDF has no readable text (it may be a scanned image). Download the report as a text PDF.",
         )
 
-    raw_accounts = parsed.get("accounts_raw", [])
-    raw_inquiries = parsed.get("inquiries_raw", [])
-    extraction_method = "parser"
-    ungrounded_values_dropped = 0
-    redactions: dict[str, int] = {}
-
-    sentinel = len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
-    if sentinel:
-        raw_accounts = []
-    # A parse is only "successful" if it produced complete-looking tradelines.
-    # A partial parse of a few near-empty rows (e.g. only original-creditor
-    # names) is a failure and must go to the verified AI fallback, exactly as
-    # an empty parse does.
-    quality = assess_accounts(raw_accounts)
-    raw_inquiries = [inq for inq in raw_inquiries if not inquiry_is_suspicious(inq)]
-
-    if not quality.complete:
-        identity = Identity.from_sources(parsed.get("personal_info"), user)
-        try:
-            extraction = await extract_with_ai(raw_text, identity, context={"user_id": str(resolved_user_id)})
-            ai_quality = assess_accounts(extraction.accounts)
-            # Take the AI result when the parser found nothing, or when the AI
-            # produced at least as many substantial tradelines as the parser.
-            if sentinel or ai_quality.substantial >= quality.substantial:
-                raw_accounts = extraction.accounts
-                raw_inquiries = [i for i in extraction.inquiries if not inquiry_is_suspicious(i)] or raw_inquiries
-                ungrounded_values_dropped = extraction.ungrounded_values_dropped
-                redactions = extraction.redactions
-                quality = ai_quality
-                extraction_method = "ai_verified" if ai_quality.complete else "ai_incomplete"
-            else:
-                extraction_method = "parser_incomplete"
-        except AIError as e:
-            logger.warning("AI extraction fallback failed: %s", e)
-            extraction_method = "failed" if not raw_accounts else "parser_incomplete"
-
+    # The original PDF is the authoritative document. Store it privately
+    # first, then read the exact stored bytes back and hand THOSE to the
+    # document model — so what we analyse is provably what we kept, and no
+    # locally derived text stands in for the report.
     report = CreditReport(
-        user_id=resolved_user_id,
-        bureau=chosen_bureau,
-        credit_score=parsed.get("credit_score"),
-        report_date=_to_datetime(parsed.get("report_date")),
-        source="manual_upload",
-        raw_text=raw_text,
-        parsed_data={
-            "personal_info": parsed.get("personal_info", {}),
-            "pages": parsed.get("pages"),
-            "extraction_method": extraction_method,
-            "extraction_quality": quality.to_dict(),
-            "ungrounded_values_dropped": ungrounded_values_dropped,
-            "redactions_before_ai": redactions,
-        },
+        user_id=resolved_user_id, bureau="unknown", source="manual_upload", raw_text=raw_text,
+        extraction_status=ExtractionStatus.EXTRACTION_INCOMPLETE.value,
     )
     db.add(report)
     await db.flush()
     report.storage_key = report_key(resolved_user_id, report.id)
+    storage = get_storage()
     try:
-        await get_storage().put(report.storage_key, content, "application/pdf")
+        await storage.put(report.storage_key, content, "application/pdf")
+        document = await storage.get(report.storage_key)
     except Exception:
         logger.exception("Storing report PDF failed")
         raise HTTPException(status_code=503, detail="Couldn't store the report file. Try again.")
+
+    if settings.document_extraction_enabled:
+        outcome = await _ingest_with_document_model(document, parsed, bureau, resolved_user_id)
+    else:
+        outcome = await _ingest_with_parser(parsed, raw_text, user, resolved_user_id)
+
+    chosen_bureau = _choose_bureau(bureau, outcome.bureau)
+    raw_accounts = outcome.accounts
+    raw_inquiries = [inq for inq in outcome.inquiries if not inquiry_is_suspicious(inq)]
+    quality = outcome.quality
+
+    report.bureau = chosen_bureau
+    report.credit_score = outcome.credit_score
+    report.score_type = outcome.score_type
+    report.report_date = _to_datetime(outcome.report_date)
+    report.extraction_status = outcome.status.value
+    report.extraction_audit = outcome.audit
+    report.public_records = outcome.public_records
+    report.parsed_data = {
+        "personal_info": parsed.get("personal_info", {}),
+        "pages": parsed.get("pages"),
+        "extraction_method": outcome.method,
+        "extraction_quality": quality.to_dict(),
+        "extraction_reasons": outcome.reasons,
+        "ungrounded_values_dropped": outcome.ungrounded_values_dropped,
+        "redactions_before_ai": outcome.redactions,
+        # The deterministic parser stays on as a cross-check, never as the
+        # authority: a disagreement is recorded, not silently resolved.
+        "parser_cross_check": outcome.cross_check,
+    }
 
     accounts = [_build_account(report.id, chosen_bureau, raw) for raw in raw_accounts]
     db.add_all(accounts)
@@ -183,30 +309,35 @@ async def upload_credit_report(
         "user_id": str(resolved_user_id),
         "bureau": chosen_bureau,
         "credit_score": report.credit_score,
-        "report_date": parsed.get("report_date"),
-        "extraction_method": extraction_method,
+        "score_type": report.score_type,
+        "report_date": outcome.report_date,
+        "extraction_method": outcome.method,
+        "extraction_status": report.extraction_status,
         "total_accounts": len(accounts),
         "total_inquiries": len(raw_inquiries),
         "extraction_complete": quality.complete,
-        "warnings": _warnings(extraction_method, ungrounded_values_dropped, len(accounts), quality),
+        "warnings": _warnings(outcome, len(accounts)),
     }
 
 
-def _warnings(method: str, dropped: int, account_count: int, quality) -> list[str]:
+def _warnings(outcome: "IngestOutcome", account_count: int) -> list[str]:
     warnings = []
-    if method in ("ai_verified", "ai_incomplete"):
+    if outcome.method in ("ai_verified", "ai_incomplete"):
         warnings.append(
             "This report's layout wasn't recognized, so accounts were extracted with AI and each value "
             "was checked against the document text. Review the accounts for accuracy."
         )
-        if dropped:
-            warnings.append(f"{dropped} extracted value(s) didn't appear in the document and were left blank.")
-    if method == "failed" or account_count == 0:
+        if outcome.ungrounded_values_dropped:
+            warnings.append(
+                f"{outcome.ungrounded_values_dropped} extracted value(s) didn't appear in the document "
+                "and were left blank."
+            )
+    if outcome.status is ExtractionStatus.FAILED or account_count == 0:
         warnings.append("No accounts could be read from this report.")
-    elif not quality.complete:
+    elif outcome.status is not ExtractionStatus.VERIFIED:
         warnings.append(
-            "Some accounts couldn't be read completely from this report. Dispute evaluation is blocked for "
-            "incomplete accounts until the report is re-uploaded or re-scanned. " + " ".join(quality.reasons)
+            "This report was not verified against the original document, so dispute evaluation is blocked "
+            "until it is re-ingested. " + " ".join(outcome.reasons or outcome.quality.reasons)
         )
     return warnings
 
@@ -239,8 +370,11 @@ async def get_report(
     report_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
 ):
     report = await _owned_report(db, report_id, user_id)
+    audit = report.extraction_audit or {}
     return {
         **_report_summary(report),
+        # Everything needed to audit the extraction: the values read, where
+        # they came from, and what the second pass said about them.
         "accounts": [
             {"id": str(a.id), **{column: getattr(a, column) for column in _ACCOUNT_COLUMNS}}
             for a in report.accounts
@@ -249,6 +383,9 @@ async def get_report(
             {"id": str(i.id), "creditor_name": i.creditor_name, "inquiry_date": i.inquiry_date, "inquiry_type": i.inquiry_type}
             for i in report.inquiries
         ],
+        "public_records": report.public_records or [],
+        "audit_findings": (audit.get("audit") or {}).get("findings") or [],
+        "parser_cross_check": (report.parsed_data or {}).get("parser_cross_check"),
     }
 
 
@@ -281,14 +418,21 @@ async def download_report_file(
 
 
 def _report_summary(report: CreditReport) -> dict[str, Any]:
+    parsed = report.parsed_data or {}
     return {
         "id": str(report.id),
         "bureau": report.bureau,
         "credit_score": report.credit_score,
+        "score_type": report.score_type,
         "report_date": report.report_date.date().isoformat() if report.report_date else None,
         "pull_date": report.pull_date.isoformat() if report.pull_date else None,
         "source": report.source,
-        "extraction_method": (report.parsed_data or {}).get("extraction_method"),
+        "extraction_method": parsed.get("extraction_method"),
+        # Explicit quality state, so the UI never shows a clean "uploaded"
+        # result for a report we couldn't read properly.
+        "extraction_status": report.extraction_status,
+        "extraction_verified": report.extraction_status == ExtractionStatus.VERIFIED.value,
+        "extraction_reasons": parsed.get("extraction_reasons") or [],
     }
 
 
