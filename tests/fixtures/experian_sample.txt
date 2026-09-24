@@ -1,0 +1,153 @@
+Experian Credit Report
+Prepared for: JHERI SAMPLE
+Report date: Sep 24, 2026
+Date of birth: Jan 1, 1990
+FICO Score 8
+Credit Score: 580
+
+This is a SANITIZED, SYNTHETIC fixture. It reproduces the flattened
+two-column pdfplumber layout of a real Experian single-bureau member report
+(colonless labels, "Account name" vs "Original creditor"), but the consumer
+identity, addresses, and account numbers are fabricated. Institution names
+are public and carry no PII.
+
+Accounts
+
+Account name ATLAS Balance $16
+Account number 5299XXXXXXXX1234 Balance updated Jun 25, 2026
+Original creditor - Credit limit $1,000
+Account type Line of Credit Monthly payment $16
+Responsibility Individual Highest balance $30
+Date opened Dec 22, 2025 Past due amount -
+Status Open/Never late Terms 12 Months
+
+Account name CAPITAL ONE Balance $842
+Account number 517805XXXXXX8842 Balance updated Jun 20, 2026
+Original creditor - Credit limit $1,500
+Account type Credit card Monthly payment $35
+Responsibility Individual Highest balance $1,200
+Date opened Mar 3, 2024 Past due amount -
+Status Open/Never late Terms Revolving
+
+Account name CREDIT ACCEPTANCE CORP Balance $12,430
+Account number 7788XXXX Balance updated Jun 18, 2026
+Original creditor - Original amount $18,000
+Account type Auto Loan Monthly payment $410
+Responsibility Individual Highest balance -
+Date opened Jan 15, 2023 Past due amount -
+Status Open/Never late Terms 60 Months
+
+Account name EXTRA Balance $0
+Account number 40011XXXXXXX2200 Balance updated Jun 10, 2026
+Original creditor - Credit limit $500
+Account type Line of Credit Monthly payment $0
+Responsibility Individual Highest balance $150
+Date opened Sep 1, 2025 Past due amount -
+Status Open/Never late Terms 12 Months
+
+Account name MISSION LANE TAB BANK Balance $410
+Account number 5178XXXXXXXX9901 Balance updated Jun 22, 2026
+Original creditor - Credit limit $700
+Account type Credit card Monthly payment $30
+Responsibility Individual Highest balance $690
+Date opened Nov 5, 2024 Past due amount -
+Status Open/Never late Terms Revolving
+
+Account name NAVY FEDERAL CR UNION Balance $2,310
+Account number 4441XXXXXXXX1020 Balance updated Jun 21, 2026
+Original creditor - Credit limit $5,000
+Account type Credit card Monthly payment $75
+Responsibility Individual Highest balance $3,000
+Date opened Jun 1, 2022 Past due amount -
+Status Open/Never late Terms Revolving
+
+Account name NAVY FEDERAL CR UNION Balance $1,800
+Account number 9002XXXX Balance updated Jun 21, 2026
+Original creditor - Original amount $2,000
+Account type Secured loan Monthly payment $90
+Responsibility Individual Highest balance -
+Date opened Feb 10, 2025 Past due amount -
+Status Open/Never late Terms 24 Months
+
+Account name SBNASELFLNDR Balance $520
+Account number 3301XXXX Balance updated Jun 15, 2026
+Original creditor - Original amount $600
+Account type Secured loan Monthly payment $25
+Responsibility Individual Highest balance -
+Date opened Apr 12, 2025 Past due amount -
+Status Open/Never late Terms 12 Months
+
+Account name SELF FINANCIAL/LEAD BA Balance $0
+Account number 3302XXXX Balance updated Jun 15, 2026
+Original creditor - Credit limit $1,000
+Account type Line of Credit Monthly payment $0
+Responsibility Individual Highest balance $300
+Date opened May 20, 2025 Past due amount -
+Status Open/Never late Terms 12 Months
+
+Account name CAINE & WEINER Balance $1,204
+Account number 88XXXX2211 Balance updated May 10, 2026
+Original creditor PROGRESSIVE Credit limit -
+Account type Collection Monthly payment -
+Responsibility Individual Highest balance $1,204
+Date opened Feb 15, 2026 Original amount $1,204
+Status Collection account Past due amount $1,204
+Comment Placed for collection
+
+Account name CREDENCE RESOURCE MANA Balance $560
+Account number 77XXXX9310 Balance updated May 12, 2026
+Original creditor AT T Credit limit -
+Account type Collection Monthly payment -
+Responsibility Individual Highest balance $560
+Date opened Mar 1, 2026 Original amount $560
+Status Collection account Past due amount $560
+Comment Placed for collection
+
+Account name CREDIT COLLECTION SERV Balance $980
+Account number 66XXXX1188 Balance updated Apr 30, 2026
+Original creditor PROGRESSIVE Credit limit -
+Account type Collection Monthly payment -
+Responsibility Individual Highest balance $980
+Date opened Jan 20, 2026 Original amount $980
+Status Collection account Past due amount $980
+Comment Placed for collection
+
+Account name JEFFERSON CAPITAL SYST Balance $1,510
+Account number 55XXXX7742 Balance updated May 1, 2026
+Original creditor MISSION LANE CREDIT CARD Credit limit -
+Account type Collection Monthly payment -
+Responsibility Individual Highest balance $1,510
+Date opened Dec 5, 2025 Original amount $1,510
+Status Collection account Past due amount $1,510
+Comment Placed for collection
+
+Account name JEFFERSON CAPITAL SYST Balance $420
+Account number 55XXXX7743 Balance updated May 1, 2026
+Original creditor T-MOBILE Credit limit -
+Account type Collection Monthly payment -
+Responsibility Individual Highest balance $420
+Date opened Dec 5, 2025 Original amount $420
+Status Collection account Past due amount $420
+Comment Placed for collection
+
+Account name LVNV FUNDING LLC Balance $735
+Account number 44XXXX2001 Balance updated Apr 20, 2026
+Original creditor CAPITAL BANK OPEN SKY Credit limit -
+Account type Collection Monthly payment -
+Responsibility Individual Highest balance $735
+Date opened Nov 15, 2025 Original amount $735
+Status Collection account Past due amount $735
+Comment Placed for collection
+
+Hard inquiries
+Hard inquiries stay on your Experian report for about 25 months.
+CAPITAL ONE Sep 23, 2026 CREDIT ONE BANK, NATIO May 15, 2026
+Prepared For JHERI SAMPLE Jan 1, 1990
+(800) 234-5678 May 1, 2026
+
+Soft inquiries
+These do not affect your credit score.
+
+Personal information
+Names: JHERI SAMPLE
+Employers: SAMPLE EMPLOYER

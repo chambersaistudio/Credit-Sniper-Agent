@@ -75,9 +75,22 @@ def parse_credit_report_pdf(content: bytes) -> dict[str, Any]:
     bureau = _detect_bureau(full_text)
     credit_score = _extract_credit_score(full_text)
     personal_info = _extract_personal_info(full_text)
-    accounts = _extract_accounts_raw(full_text)
-    inquiries = _extract_inquiries_raw(full_text)
     report_date = _extract_report_date(full_text)
+
+    # Experian's labelled two-column grid needs its own parser; the generic
+    # `label:` parser reads almost nothing from it. Use it when that layout is
+    # present and it actually yields tradelines, else fall back to generic.
+    from app.services import experian_parser
+
+    accounts = inquiries = None
+    if experian_parser.looks_like_experian(full_text):
+        experian_accounts = experian_parser.parse_experian_accounts(full_text)
+        if experian_accounts:
+            accounts = experian_accounts
+            inquiries = experian_parser.parse_experian_inquiries(full_text)
+    if accounts is None:
+        accounts = _extract_accounts_raw(full_text)
+        inquiries = _extract_inquiries_raw(full_text)
 
     return {
         "raw_text": full_text,

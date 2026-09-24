@@ -136,6 +136,13 @@ def validate_proposal(out: ClaimProposalOut, view: AccountView, finding_ids: dic
         })
     if not corrected.has_dispute_ground and corrected.recommended_action not in ("no_dispute", "need_more_evidence"):
         corrected = corrected.model_copy(update={"recommended_action": "no_dispute"})
+    # "No dispute ground" must mean the records were sufficient to judge the
+    # account accurate — never that information was missing. If the model
+    # itself is still asking for more evidence, that's "need more evidence",
+    # not a clean "no dispute". Prevents concluding no-dispute from a gap.
+    if corrected.recommended_action == "no_dispute" and corrected.additional_evidence_needed:
+        corrected = corrected.model_copy(update={"recommended_action": "need_more_evidence"})
+        notes.append("Model still requested more evidence, so this is 'need more evidence', not 'no dispute'.")
     return corrected, supporting, notes
 
 

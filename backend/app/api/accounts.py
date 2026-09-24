@@ -15,10 +15,12 @@ from app.auth import current_user, current_user_id
 from app.database import get_db
 from app.models.case import Case, Claim
 from app.models.user import User
+from app.services.ai import ModelTier
 from app.services.case_service import save_evaluation
 from app.services.credit_profile import AccountView, load_account, load_profile, view_to_dict
+from app.services.extraction_quality import record_is_disputable
 from app.services.legal_references import REFERENCES
-from app.services.reasoning_engine import evaluate_account
+from app.services.reasoning_engine import ClaimProposal, evaluate_account
 from app.services.redaction import Identity
 from app.utils.default_user import parse_uuid
 
@@ -50,6 +52,30 @@ def claim_to_dict(claim: Claim) -> dict[str, Any]:
             for e in claim.evidence
         ],
     }
+
+
+def _extraction_incomplete_proposal() -> ClaimProposal:
+    """A deterministic 'not enough was extracted to evaluate this account'
+    result — never 'no dispute ground'. No AI call is made."""
+    return ClaimProposal(
+        has_dispute_ground=False,
+        recommended_action="need_more_evidence",
+        reasoning=(
+            "The source report text for this account couldn't be read completely, so there isn't enough "
+            "verified information to evaluate a dispute. This is an extraction problem, not a finding that "
+            "the account is reported accurately. Re-upload or re-scan the report (a text-based PDF) and try again."
+        ),
+        supporting_findings=[],
+        disputed_fields=[],
+        recipients=[],
+        legal_explanations={},
+        requested_remedy=None,
+        additional_evidence_needed=["A complete, text-based copy of this account's tradeline from the report."],
+        confidence=0.0,
+        tier=ModelTier.REASONING,
+        model="extraction_incomplete",
+        validation_notes=["extraction_incomplete"],
+    )
 
 
 async def _current_claims(db: AsyncSession, canonical_ids: list) -> dict:
@@ -111,12 +137,20 @@ async def evaluate(
     its current evaluation — a grounded dispute basis or an explicit
     'no dispute ground'. Opens nothing; the consumer decides on cases."""
     view = await _owned_account(db, account_id, user.id)
-    # Identity is used only to build the redaction set (never inserted into
-    # the prompt); it is the authenticated owner's own profile.
-    identity = Identity.from_sources(None, user)
-    proposal = await evaluate_account(
-        view, context={"user_id": str(user.id), "canonical_account_id": account_id}, identity=identity,
-    )
+
+    # Precondition: don't reason over an account whose source text couldn't be
+    # read completely. Returning "no dispute ground" from missing evidence
+    # would be wrong (and would spend an AI call); surface it as
+    # extraction-incomplete / need-more-evidence instead.
+    if not any(record_is_disputable(r) for r in view.records):
+        proposal = _extraction_incomplete_proposal()
+    else:
+        # Identity is used only to build the redaction set (never inserted into
+        # the prompt); it is the authenticated owner's own profile.
+        identity = Identity.from_sources(None, user)
+        proposal = await evaluate_account(
+            view, context={"user_id": str(user.id), "canonical_account_id": account_id}, identity=identity,
+        )
     claim = await save_evaluation(db, user.id, view.canonical.id, proposal)
     await db.commit()
     result = await db.execute(select(Claim).where(Claim.id == claim.id).options(selectinload(Claim.evidence)))

@@ -24,6 +24,7 @@ from app.models.user import User
 from app.services.account_matcher import link_accounts
 from app.services.ai import AIError
 from app.services.ai_extraction import extract_with_ai
+from app.services.extraction_quality import assess_accounts, inquiry_is_suspicious
 from app.services.pdf_parser import parse_credit_report_pdf
 from app.services.redaction import Identity
 from app.services.storage import get_storage, report_key
@@ -106,20 +107,35 @@ async def upload_credit_report(
     ungrounded_values_dropped = 0
     redactions: dict[str, int] = {}
 
-    parser_failed = len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
-    if parser_failed:
+    sentinel = len(raw_accounts) == 1 and raw_accounts[0].get("extraction_method") == "full_text_ai_parse"
+    if sentinel:
         raw_accounts = []
+    # A parse is only "successful" if it produced complete-looking tradelines.
+    # A partial parse of a few near-empty rows (e.g. only original-creditor
+    # names) is a failure and must go to the verified AI fallback, exactly as
+    # an empty parse does.
+    quality = assess_accounts(raw_accounts)
+    raw_inquiries = [inq for inq in raw_inquiries if not inquiry_is_suspicious(inq)]
+
+    if not quality.complete:
         identity = Identity.from_sources(parsed.get("personal_info"), user)
         try:
             extraction = await extract_with_ai(raw_text, identity, context={"user_id": str(resolved_user_id)})
-            raw_accounts = extraction.accounts
-            raw_inquiries = raw_inquiries or extraction.inquiries
-            ungrounded_values_dropped = extraction.ungrounded_values_dropped
-            redactions = extraction.redactions
-            extraction_method = "ai_verified"
+            ai_quality = assess_accounts(extraction.accounts)
+            # Take the AI result when the parser found nothing, or when the AI
+            # produced at least as many substantial tradelines as the parser.
+            if sentinel or ai_quality.substantial >= quality.substantial:
+                raw_accounts = extraction.accounts
+                raw_inquiries = [i for i in extraction.inquiries if not inquiry_is_suspicious(i)] or raw_inquiries
+                ungrounded_values_dropped = extraction.ungrounded_values_dropped
+                redactions = extraction.redactions
+                quality = ai_quality
+                extraction_method = "ai_verified" if ai_quality.complete else "ai_incomplete"
+            else:
+                extraction_method = "parser_incomplete"
         except AIError as e:
             logger.warning("AI extraction fallback failed: %s", e)
-            extraction_method = "failed"
+            extraction_method = "failed" if not raw_accounts else "parser_incomplete"
 
     report = CreditReport(
         user_id=resolved_user_id,
@@ -132,6 +148,7 @@ async def upload_credit_report(
             "personal_info": parsed.get("personal_info", {}),
             "pages": parsed.get("pages"),
             "extraction_method": extraction_method,
+            "extraction_quality": quality.to_dict(),
             "ungrounded_values_dropped": ungrounded_values_dropped,
             "redactions_before_ai": redactions,
         },
@@ -170,13 +187,14 @@ async def upload_credit_report(
         "extraction_method": extraction_method,
         "total_accounts": len(accounts),
         "total_inquiries": len(raw_inquiries),
-        "warnings": _warnings(extraction_method, ungrounded_values_dropped, len(accounts)),
+        "extraction_complete": quality.complete,
+        "warnings": _warnings(extraction_method, ungrounded_values_dropped, len(accounts), quality),
     }
 
 
-def _warnings(method: str, dropped: int, account_count: int) -> list[str]:
+def _warnings(method: str, dropped: int, account_count: int, quality) -> list[str]:
     warnings = []
-    if method == "ai_verified":
+    if method in ("ai_verified", "ai_incomplete"):
         warnings.append(
             "This report's layout wasn't recognized, so accounts were extracted with AI and each value "
             "was checked against the document text. Review the accounts for accuracy."
@@ -185,6 +203,11 @@ def _warnings(method: str, dropped: int, account_count: int) -> list[str]:
             warnings.append(f"{dropped} extracted value(s) didn't appear in the document and were left blank.")
     if method == "failed" or account_count == 0:
         warnings.append("No accounts could be read from this report.")
+    elif not quality.complete:
+        warnings.append(
+            "Some accounts couldn't be read completely from this report. Dispute evaluation is blocked for "
+            "incomplete accounts until the report is re-uploaded or re-scanned. " + " ".join(quality.reasons)
+        )
     return warnings
 
 

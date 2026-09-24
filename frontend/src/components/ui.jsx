@@ -74,7 +74,14 @@ export const money = v => (v === null || v === undefined ? '—' : `$${Number(v)
 
 export function shortDate(iso) {
   if (!iso) return '—'
-  const d = new Date(iso)
+  // A date-only value like "2026-09-24" is a calendar date, not an instant.
+  // `new Date("2026-09-24")` parses as UTC midnight, which renders as the day
+  // before in any timezone behind UTC — so build it in local time from parts
+  // and keep the calendar date the report actually states.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+  const d = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
