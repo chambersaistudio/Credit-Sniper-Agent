@@ -40,6 +40,14 @@ collection. If the report also names an original creditor, that goes in `origina
 "Caine & Weiner" with original creditor "Progressive" — it is NOT an account named "Progressive".
 - Copy money and dates exactly as printed (for example "$1,204" and "Feb 15, 2026"). Do not convert them.
 - Transcribe the month-by-month payment grid cell by cell, keeping each code exactly as printed.
+- Keep these distinct concepts in their own fields, never merged:
+  * `balance_updated` is the "Balance updated" date. `date_last_reported` is only for a field the report \
+actually labels "Last reported"/"Date reported". If only "Balance updated" is printed, leave \
+`date_last_reported` null.
+  * `payment_status` is the account's own payment standing. A page or section label such as "Potentially \
+negative" or "Exceptional payment history" is a `report_classification`, not a payment status or account status.
+  * For inquiries, `inquiry_type` is hard/soft (only if stated). A "Business Type" such as "Bank Credit Cards" \
+is the company's industry and belongs in `business_type`.
 - Include every tradeline in the report, including closed and collection accounts, and do not list the same \
 tradeline twice.
 - For each account record the pages you read it from, a short excerpt proving its identity, and short excerpts \
@@ -58,7 +66,17 @@ separately and correctly?
 - the inquiries and their dates
 - any field asserted by the extraction that the document does not support
 
-Report every disagreement as a finding. Set `verified` true only if the extraction can be relied on as-is."""
+Field semantics you must respect rather than "correct":
+- `balance_updated` and `date_last_reported` are different fields. A "Balance updated" date belongs in \
+`balance_updated`, and `date_last_reported` staying null is correct when the report labels no "Last reported" field.
+- A page/section label such as "Potentially negative" or "Exceptional payment history" belongs in \
+`report_classification`. It is not a `payment_status` or an account status.
+- An inquiry's `inquiry_type` is hard/soft. A "Business Type" such as "Bank Credit Cards" is the company's \
+industry and belongs in `business_type` — do not report it as a wrong `inquiry_type`.
+- A field the report simply does not print (for example no Date of First Delinquency in a consumer \
+disclosure) is not an extraction error. Report it, if at all, as `ambiguous`, never as a `correction`.
+
+Report every genuine disagreement as a finding. Set `verified` true only if the extraction can be relied on as-is."""
 
 
 @dataclass
@@ -73,12 +91,15 @@ class DocumentExtractionResult:
     def audit_to_dict(self) -> dict[str, Any]:
         """What we persist about the audit — findings and counts, never the
         document or the model's view of its contents beyond the findings."""
+        benign, _ = triage_findings(self.extraction, self.audit) if self.extraction else ([], [])
         return {
             "status": self.status.value,
             "reasons": self.reasons,
             "extractor_model": self.extractor_model,
             "auditor_model": self.auditor_model,
             "audit": self.audit.model_dump() if self.audit else None,
+            # Kept visible, but they did not hold the report back.
+            "set_aside": [{**f.model_dump(), "set_aside_because": why} for f, why in benign],
         }
 
 
@@ -95,6 +116,71 @@ def _audit_prompt(extraction: CreditReportExtraction) -> str:
         f"<extraction>\n{extraction.model_dump_json(indent=2)}\n</extraction>\n\n"
         "Audit it against the attached original PDF and report every disagreement."
     )
+
+
+# Page/section labels Experian files accounts under. They describe where an
+# account sits in the report, not how it is being paid.
+_REPORT_CLASSIFICATIONS = (
+    "potentially negative", "exceptional payment history", "accounts in good standing",
+    "negative items", "closed accounts", "open accounts",
+)
+_NOT_STATED = ("", "none", "null", "n/a", "na", "not disclosed", "not reported", "not provided", "-")
+
+
+def _norm(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _benign_reason(finding, extraction: CreditReportExtraction) -> str | None:
+    """Is this audit finding a known field-semantics confusion rather than a
+    real disagreement about the document?
+
+    These are cases where the auditor reads a value correctly but files it
+    under the wrong concept. Treating them as blocking would hold a perfectly
+    good extraction hostage, so they are recorded and set aside. Anything not
+    matched here still blocks."""
+    field = _norm(finding.field)
+    proposed = _norm(finding.correct_value)
+
+    # "Business Type: Bank Credit Cards" is the company's industry, not the
+    # inquiry's hard/soft classification.
+    if field in ("inquiry_type", "business_type"):
+        known_business_types = {_norm(i.business_type) for i in extraction.inquiries if i.business_type}
+        if proposed and (proposed not in ("hard", "soft") or field == "business_type"):
+            return "Business Type is the company's industry, not the inquiry's hard/soft type."
+        if proposed in known_business_types:
+            return "Proposed inquiry_type is a Business Type already recorded in business_type."
+
+    # "Balance updated" is its own date; date_last_reported stays null unless
+    # the report labels a Last reported / Date reported field.
+    if field in ("date_last_reported", "balance_updated"):
+        balance_updates = {_norm(a.balance_updated) for a in extraction.accounts if a.balance_updated}
+        if proposed and proposed in balance_updates:
+            return "'Balance updated' is a distinct field from 'Last reported'; it is recorded separately."
+
+    # A page-level label is not a payment or account status.
+    if field in ("payment_status", "status_raw", "status_normalized", "account_status"):
+        classifications = {_norm(a.report_classification) for a in extraction.accounts if a.report_classification}
+        if proposed in classifications or any(c in proposed for c in _REPORT_CLASSIFICATIONS):
+            return "Report section label recorded as report_classification, not a payment/account status."
+
+    # A field the disclosure simply doesn't print is not an extraction error.
+    if "delinquency" in field and proposed in _NOT_STATED:
+        return "Date of First Delinquency is not disclosed in this report; absence is not an inaccuracy."
+
+    return None
+
+
+def triage_findings(extraction: CreditReportExtraction, audit: AuditReport | None):
+    """Split audit findings into (benign field-semantics confusions, blocking
+    disagreements)."""
+    if audit is None:
+        return [], []
+    benign, blocking = [], []
+    for finding in audit.findings:
+        reason = _benign_reason(finding, extraction)
+        (benign if reason else blocking).append((finding, reason))
+    return benign, blocking
 
 
 def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> tuple[ExtractionStatus, list[str]]:
@@ -130,6 +216,12 @@ def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> 
         reasons.append("No independent audit was run against the document.")
         return ExtractionStatus.NEEDS_AUDIT, reasons
 
+    benign, blocking = triage_findings(extraction, audit)
+    blocking_findings = [f for f, _ in blocking]
+    # A disagreement explained entirely by field-semantics confusion doesn't
+    # hold the report back; an unexplained "not verified" still does.
+    fully_explained = bool(benign) and not blocking_findings
+
     if not audit.account_count_matches:
         counted = audit.account_count_in_document
         reasons.append(
@@ -137,22 +229,22 @@ def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> 
         )
     if not audit.identities_correct:
         reasons.append("Audit disputes one or more account identities (furnisher vs original creditor).")
-    if not audit.inquiries_correct:
+    if not audit.inquiries_correct and not fully_explained:
         reasons.append("Audit disputes the extracted inquiries.")
 
-    missing = [f for f in audit.findings if f.kind == "missing_account"]
+    missing = [f for f in blocking_findings if f.kind == "missing_account"]
     if missing:
         reasons.append(f"Audit found {len(missing)} account(s) missing from the extraction.")
-    duplicated = [f for f in audit.findings if f.kind == "duplicate_account"]
+    duplicated = [f for f in blocking_findings if f.kind == "duplicate_account"]
     if duplicated:
         reasons.append(f"Audit found {len(duplicated)} duplicated account(s).")
-    corrections = [f for f in audit.findings if f.kind == "correction"]
+    corrections = [f for f in blocking_findings if f.kind == "correction"]
     if corrections:
         reasons.append(f"Audit corrected {len(corrections)} field(s); values were not auto-applied.")
-    unsupported = [f for f in audit.findings if f.kind == "unsupported_field"]
+    unsupported = [f for f in blocking_findings if f.kind == "unsupported_field"]
     if unsupported:
         reasons.append(f"Audit found {len(unsupported)} field(s) the document does not support.")
-    ambiguous = [f for f in audit.findings if f.kind == "ambiguous"]
+    ambiguous = [f for f in blocking_findings if f.kind == "ambiguous"]
     if ambiguous:
         reasons.append(f"Audit flagged {len(ambiguous)} ambiguity/ambiguities needing review.")
 
@@ -160,8 +252,10 @@ def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> 
     # contents — that's incomplete, not merely unverified.
     if missing or duplicated or duplicates or not audit.account_count_matches or not extraction.accounts:
         return ExtractionStatus.EXTRACTION_INCOMPLETE, reasons
-    if not audit.verified or reasons:
-        return ExtractionStatus.NEEDS_AUDIT, reasons or ["Audit did not verify the extraction."]
+    if reasons:
+        return ExtractionStatus.NEEDS_AUDIT, reasons
+    if not audit.verified and not fully_explained:
+        return ExtractionStatus.NEEDS_AUDIT, ["Audit did not verify the extraction."]
     return ExtractionStatus.VERIFIED, []
 
 

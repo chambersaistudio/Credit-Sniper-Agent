@@ -58,30 +58,35 @@ def claim_to_dict(claim: Claim) -> dict[str, Any]:
 def _extraction_incomplete_proposal(records: list[dict[str, Any]] | None = None) -> ClaimProposal:
     """A deterministic 'not enough was extracted to evaluate this account'
     result — never 'no dispute ground'. No AI call is made."""
-    unverified = any(
-        (r.get("extraction_status") or ExtractionStatus.EXTRACTION_INCOMPLETE.value)
-        != ExtractionStatus.VERIFIED.value
-        for r in (records or [])
-    )
-    cause = (
-        "this account's report has not been verified against the original document"
-        if unverified else
-        "the source report for this account couldn't be read completely"
-    )
+    statuses = {
+        (r.get("extraction_status") or ExtractionStatus.EXTRACTION_INCOMPLETE.value) for r in (records or [])
+    }
+    if ExtractionStatus.NEEDS_AUDIT.value in statuses:
+        # The document was read fine — the verification pass just disagreed.
+        # Telling the consumer to re-upload here would be wrong and useless.
+        reasoning = (
+            "This report was read successfully, but the verification pass found unresolved extraction "
+            "differences. Dispute analysis is paused until those differences are reconciled. This is not a "
+            "finding that the account is reported accurately."
+        )
+        needed = ["Reconciliation of the differences the verification pass flagged for this report."]
+    else:
+        reasoning = (
+            "No dispute was evaluated because this account's report couldn't be read completely, so there "
+            "isn't enough verified information to judge it. This is an extraction problem, not a finding "
+            "that the account is reported accurately. Re-upload the report (a text-based PDF) and try again."
+        )
+        needed = ["A complete, readable copy of this account's tradeline from the report."]
     return ClaimProposal(
         has_dispute_ground=False,
         recommended_action="need_more_evidence",
-        reasoning=(
-            f"No dispute was evaluated because {cause}, so there isn't enough verified information to judge it. "
-            "This is an extraction problem, not a finding that the account is reported accurately. "
-            "Re-upload the report (a text-based PDF) so it can be read and verified, then try again."
-        ),
+        reasoning=reasoning,
         supporting_findings=[],
         disputed_fields=[],
         recipients=[],
         legal_explanations={},
         requested_remedy=None,
-        additional_evidence_needed=["A complete, text-based copy of this account's tradeline from the report."],
+        additional_evidence_needed=needed,
         confidence=0.0,
         tier=ModelTier.REASONING,
         model="extraction_incomplete",

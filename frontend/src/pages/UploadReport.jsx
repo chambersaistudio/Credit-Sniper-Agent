@@ -56,10 +56,16 @@ export default function UploadReport() {
             <div className="stat"><div className="stat-label">Accounts read</div><div className="stat-value">{result.total_accounts}</div></div>
             <div className="stat"><div className="stat-label">Inquiries read</div><div className="stat-value">{result.total_inquiries}</div></div>
           </div>
-          {!verified && (
+          {result.extraction_status === 'needs_audit' && (
+            <div className="alert alert-warn">
+              This report was read successfully, but the verification pass found unresolved extraction
+              differences. Dispute analysis is paused until those differences are reconciled.
+            </div>
+          )}
+          {!verified && result.extraction_status !== 'needs_audit' && (
             <div className="alert alert-error">
-              Your original PDF is stored safely, but it wasn't verified against the document, so dispute
-              analysis is on hold for this report.
+              Your original PDF is stored safely, but it couldn't be read completely, so dispute analysis
+              is on hold for this report.
             </div>
           )}
           {result.warnings.map(w => <div key={w} className="alert alert-warn">{w}</div>)}

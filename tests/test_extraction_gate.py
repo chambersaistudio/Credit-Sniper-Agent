@@ -101,5 +101,10 @@ async def test_unverified_report_blocks_evaluation(client, ai, status):
     body = resp.json()
     assert body["recommended_action"] == "need_more_evidence"
     assert body["has_dispute_ground"] is False
-    assert "not been verified" in body["reasoning"]
+    expected = ("verification pass found unresolved extraction differences"
+                if status == "needs_audit" else "couldn't be read completely")
+    assert expected in body["reasoning"]
+    # Never tell the consumer to re-upload a document that read fine.
+    if status == "needs_audit":
+        assert "Re-upload" not in body["reasoning"]
     assert ai.calls == []

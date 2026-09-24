@@ -92,6 +92,8 @@ const SEVERITY = {
   likely_inaccuracy: ['amber', 'Likely inaccuracy'],
   potential_inconsistency: ['sky', 'Potential inconsistency'],
   difference: ['', 'Difference'],
+  // The report doesn't print the field. A question to ask, not an error.
+  not_disclosed: ['', 'Not disclosed'],
 }
 export function SeverityBadge({ severity }) {
   const [tone, label] = SEVERITY[severity] || ['', humanize(severity)]

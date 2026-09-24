@@ -10,9 +10,11 @@ const SKIP = new Set(['id', 'creditor_name', 'payment_history', 'field_evidence'
 // can be used for dispute analysis at all.
 const STATUS = {
   verified: ['ok', 'Verified against your original PDF', 'Two independent passes read your uploaded document and agreed.'],
-  needs_audit: ['warn', 'Not verified', 'The review pass disagreed with the first reading, so this report is on hold for dispute analysis. Nothing was auto-corrected.'],
-  extraction_incomplete: ['error', 'Incomplete', "Your document wasn't read completely, so this report can't be used for dispute analysis yet."],
-  failed: ['error', 'Could not be read', 'Your original PDF is stored safely, but nothing could be extracted from it.'],
+  // The document WAS read — only the verification pass disagreed. Never tell
+  // the consumer to re-upload here; the file was fine.
+  needs_audit: ['warn', 'Read, not yet verified', 'This report was read successfully, but the verification pass found unresolved extraction differences. Dispute analysis is paused until those differences are reconciled. Nothing was auto-corrected.'],
+  extraction_incomplete: ['error', 'Incomplete', "Your document wasn't read completely, so this report can't be used for dispute analysis yet. Re-uploading a text-based PDF may help."],
+  failed: ['error', 'Could not be read', 'Your original PDF is stored safely, but nothing could be extracted from it. Try re-uploading a text-based PDF.'],
 }
 
 export default function ReportDetail() {

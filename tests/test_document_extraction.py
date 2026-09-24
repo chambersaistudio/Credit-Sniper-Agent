@@ -32,6 +32,7 @@ def tradeline(**kw) -> ExtractedTradeline:
         creditor_name="CAINE & WEINER", original_creditor="PROGRESSIVE", sold_to=None,
         account_number="88XXXX2211", account_type="Collection", open_closed="Open",
         status_raw="Collection account", status_normalized="collection", payment_status=None,
+        report_classification="Potentially negative",
         balance="$1,204", balance_updated="May 10, 2026", credit_limit=None,
         original_amount="$1,204", past_due_amount="$1,204", monthly_payment=None,
         high_balance="$1,204", terms=None, responsibility="Individual",
@@ -54,7 +55,8 @@ def extraction(**kw) -> CreditReportExtraction:
         bureau="experian", report_date="Sep 24, 2026", score_type="FICO Score 8", score=580,
         summary_metrics=[], accounts=[tradeline()],
         inquiries=[ExtractedInquiry(creditor_name="CAPITAL ONE", inquiry_date="Sep 23, 2026",
-                                    inquiry_type="hard", contact=None, source_pages=[20])],
+                                    inquiry_type="hard", business_type="Bank Credit Cards",
+                                    contact=None, source_pages=[20])],
         public_records=[], unreadable_pages=[], warnings=[],
     )
     base.update(kw)
@@ -147,11 +149,13 @@ def test_normalized_status_falls_back_to_the_printed_wording():
 def test_inquiry_rows_skip_blank_names():
     report = extraction(inquiries=[
         ExtractedInquiry(creditor_name="CAPITAL ONE", inquiry_date="Sep 23, 2026", inquiry_type=None,
-                         contact=None, source_pages=[20]),
-        ExtractedInquiry(creditor_name="   ", inquiry_date=None, inquiry_type=None, contact=None, source_pages=[]),
+                         business_type="Bank Credit Cards", contact=None, source_pages=[20]),
+        ExtractedInquiry(creditor_name="   ", inquiry_date=None, inquiry_type=None, business_type=None,
+                         contact=None, source_pages=[]),
     ])
     rows = inquiry_rows(report)
-    assert rows == [{"creditor_name": "CAPITAL ONE", "inquiry_date": "Sep 23, 2026", "inquiry_type": "hard"}]
+    assert rows == [{"creditor_name": "CAPITAL ONE", "inquiry_date": "Sep 23, 2026",
+                     "inquiry_type": "hard", "business_type": "Bank Credit Cards"}]
 
 
 # ── Two-pass reconciliation ────────────────────────────────────────────────

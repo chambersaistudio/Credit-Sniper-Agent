@@ -53,11 +53,15 @@ def _tradeline(index, name, original, type_, number, balance) -> ExtractedTradel
         account_type=type_, open_closed="Open",
         status_raw="Collection account" if collection else "Open/Never late",
         status_normalized="collection" if collection else "open", payment_status=None,
+        report_classification="Potentially negative" if collection else "Exceptional payment history",
         balance=balance, balance_updated="Jun 25, 2026", credit_limit=None if collection else "$1,000",
         original_amount=balance if collection else None, past_due_amount=balance if collection else None,
         monthly_payment=None if collection else "$16", high_balance=balance, terms=None,
         responsibility="Individual", date_opened="Dec 22, 2025", date_closed=None,
-        status_updated="Jun 25, 2026", date_first_delinquency=None, date_last_reported="Jun 25, 2026",
+        status_updated="Jun 25, 2026", date_first_delinquency=None,
+        # Like the real Experian disclosure: it prints "Balance updated" and
+        # no "Last reported" field at all.
+        date_last_reported=None,
         date_last_payment=None, remarks="Placed for collection" if collection else None,
         consumer_dispute=None, contact=None,
         payment_history=[PaymentHistoryEntry(year=2026, month=5, raw_code="OK", code="current")],
@@ -74,9 +78,10 @@ def golden_extraction() -> CreditReportExtraction:
         accounts=[_tradeline(i, *row) for i, row in enumerate(GOLDEN)],
         inquiries=[
             ExtractedInquiry(creditor_name="CAPITAL ONE", inquiry_date="Sep 23, 2026", inquiry_type="hard",
-                             contact=None, source_pages=[20]),
+                             business_type="Bank Credit Cards", contact=None, source_pages=[20]),
             ExtractedInquiry(creditor_name="CREDIT ONE BANK, NATIO", inquiry_date="May 15, 2026",
-                             inquiry_type="hard", contact=None, source_pages=[20]),
+                             inquiry_type="hard", business_type="Bank Credit Cards",
+                             contact=None, source_pages=[20]),
         ],
         public_records=[], unreadable_pages=[], warnings=[],
     )
@@ -232,7 +237,9 @@ async def test_audit_disagreement_blocks_evaluation(client, document_ai):
     document_ai(audit=disputed)
     body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
     assert body["extraction_status"] == "needs_audit"
-    assert any("not verified" in w for w in body["warnings"])
+    # Read fine, verification disagreed — the copy must not suggest re-uploading.
+    assert any("verification pass found unresolved" in w for w in body["warnings"])
+    assert not any("re-upload" in w.lower() for w in body["warnings"])
 
     detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
     assert detail["extraction_verified"] is False
@@ -311,3 +318,65 @@ async def test_verified_document_ingestion_permits_evaluation(client, document_a
     evaluation = (await client.post(f"/api/accounts/{account['id']}/evaluate")).json()
     assert evaluation["recommended_action"] != "need_more_evidence"
     assert len(reasoning.calls) == 1  # the reasoning engine actually ran
+
+
+def live_false_positive_audit() -> AuditReport:
+    """The audit from the first live Experian run: correct extraction, but two
+    findings that confuse Business Type with inquiry_type, plus a complaint
+    that a non-disclosed DOFD is missing."""
+    return AuditReport(
+        account_count_in_document=15, account_count_matches=True, identities_correct=True,
+        inquiries_correct=False, verified=False, confidence=0.6,
+        findings=[
+            AuditFinding(kind="correction", account_name="CAPITAL ONE", field="inquiry_type",
+                         extracted_value="hard", correct_value="Bank Credit Cards", page=20,
+                         explanation="Business Type: Bank Credit Cards"),
+            AuditFinding(kind="correction", account_name="CREDIT ONE BANK, NATIO", field="inquiry_type",
+                         extracted_value="hard", correct_value="Bank Credit Cards", page=20,
+                         explanation="Business Type: Bank Credit Cards"),
+        ],
+    )
+
+
+async def test_live_experian_false_positives_no_longer_block_verification(client, document_ai):
+    """The exact report that was held in NEEDS_AUDIT now reaches VERIFIED: the
+    only disagreements were Business-Type-vs-inquiry_type confusions, which are
+    field semantics, not disagreements about the document."""
+    document_ai(audit=live_false_positive_audit())
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+
+    assert body["extraction_status"] == "verified"
+    assert body["total_accounts"] == 15
+    assert body["warnings"] == []
+
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+    # Business type is preserved in its own field; inquiry_type stays hard/soft.
+    inquiries = {i["creditor_name"]: i for i in detail["inquiries"]}
+    assert inquiries["CAPITAL ONE"]["business_type"] == "Bank Credit Cards"
+    assert inquiries["CAPITAL ONE"]["inquiry_type"] == "hard"
+    assert inquiries["CREDIT ONE BANK, NATIO"]["business_type"] == "Bank Credit Cards"
+    # The findings are still on record, marked as set aside rather than applied.
+    set_aside = (detail_audit := (await client.get(f"/api/reports/{body['report_id']}")).json())["audit_findings"]
+    assert len(set_aside) == 2 and detail_audit["extraction_verified"] is True
+
+
+async def test_balance_updated_is_not_last_reported(client, document_ai):
+    document_ai()
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+    account = next(a for a in detail["accounts"] if a["creditor_name"] == "ATLAS")
+    # The fixture prints only "Balance updated"; no Last reported field exists.
+    assert account["balance_updated_date"] == "Jun 25, 2026"
+    assert account["date_last_reported"] is None
+
+
+async def test_section_labels_do_not_become_payment_status(client, document_ai):
+    document_ai()
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+    for account in detail["accounts"]:
+        assert account["payment_status"] not in ("Potentially negative", "Exceptional payment history")
+        assert account["account_status_raw"] not in ("Potentially negative", "Exceptional payment history")
+    atlas = next(a for a in detail["accounts"] if a["creditor_name"] == "ATLAS")
+    assert atlas["report_classification"] == "Exceptional payment history"
+    assert atlas["account_status"] == "open"  # still a real status

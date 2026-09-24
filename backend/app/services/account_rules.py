@@ -60,11 +60,15 @@ def evaluate_record(record: dict[str, Any], as_of: date) -> list[Finding]:
             ))
 
     if negative and not dofd:
+        # Not an inconsistency. Consumer disclosures routinely omit this field
+        # even when the furnisher reports it, so its absence is a verification
+        # opportunity, not evidence of anything being wrong. It only becomes a
+        # dispute signal alongside contradictory or impossible evidence.
         findings.append(Finding(
-            "record.missing_dofd", "date_of_first_delinquency", Severity.POTENTIAL_INCONSISTENCY,
-            "Adverse account shows no Date of First Delinquency, so its reporting period can't be "
-            "verified from this report. Consumer disclosures sometimes omit the field even when the "
-            "furnisher reports it, so this is a question to ask, not yet an error.",
+            "record.missing_dofd", "date_of_first_delinquency", Severity.NOT_DISCLOSED,
+            "This report doesn't disclose a Date of First Delinquency for this adverse account, so its "
+            "reporting period can't be checked from this document alone. That absence is not itself an "
+            "inaccuracy — it's a question worth asking the furnisher.",
             {"account_status": record.get("account_status")},
             bureau,
         ))

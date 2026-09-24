@@ -44,11 +44,11 @@ PDF_MAGIC = b"%PDF-"
 
 _ACCOUNT_COLUMNS = (
     "creditor_name", "original_creditor", "sold_to", "account_number", "account_type",
-    "account_status", "account_status_raw", "payment_status",
+    "account_status", "account_status_raw", "payment_status", "report_classification",
     "balance", "past_due_amount", "high_balance", "credit_limit", "original_amount", "monthly_payment",
     "terms", "responsibility", "consumer_dispute",
     "date_opened", "date_closed", "date_of_first_delinquency", "date_last_reported",
-    "date_last_payment", "date_last_active", "date_status_updated", "remarks",
+    "date_last_payment", "date_last_active", "date_status_updated", "balance_updated_date", "remarks",
     "payment_history", "contact", "source_pages", "field_evidence",
 )
 # Parser fields kept only in raw_data for traceability (no dedicated column).
@@ -303,6 +303,7 @@ async def upload_credit_report(
             creditor_name=inq.get("creditor_name"),
             inquiry_date=inq.get("inquiry_date"),
             inquiry_type=inq.get("inquiry_type", "hard"),
+            business_type=inq.get("business_type"),
         )
         for inq in raw_inquiries
     )
@@ -340,10 +341,17 @@ def _warnings(outcome: "IngestOutcome", account_count: int) -> list[str]:
             )
     if outcome.status is ExtractionStatus.FAILED or account_count == 0:
         warnings.append("No accounts could be read from this report.")
+    elif outcome.status is ExtractionStatus.NEEDS_AUDIT:
+        # Read fine; the verification pass disagreed. Don't suggest re-uploading.
+        warnings.append(
+            "This report was read successfully, but the verification pass found unresolved extraction "
+            "differences. Dispute analysis is paused until those differences are reconciled. "
+            + " ".join(outcome.reasons)
+        )
     elif outcome.status is not ExtractionStatus.VERIFIED:
         warnings.append(
-            "This report was not verified against the original document, so dispute evaluation is blocked "
-            "until it is re-ingested. " + " ".join(outcome.reasons or outcome.quality.reasons)
+            "This report couldn't be read completely, so dispute evaluation is blocked until it is "
+            "re-ingested. " + " ".join(outcome.reasons or outcome.quality.reasons)
         )
     return warnings
 
@@ -386,7 +394,8 @@ async def get_report(
             for a in report.accounts
         ],
         "inquiries": [
-            {"id": str(i.id), "creditor_name": i.creditor_name, "inquiry_date": i.inquiry_date, "inquiry_type": i.inquiry_type}
+            {"id": str(i.id), "creditor_name": i.creditor_name, "inquiry_date": i.inquiry_date,
+             "inquiry_type": i.inquiry_type, "business_type": i.business_type}
             for i in report.inquiries
         ],
         "public_records": report.public_records or [],

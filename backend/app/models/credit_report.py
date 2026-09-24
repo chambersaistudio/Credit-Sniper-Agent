@@ -55,7 +55,10 @@ class CreditAccount(Base):
     account_type = Column(String)
     account_status = Column(String)  # normalized: open | closed | paid | charged_off | collection | ...
     account_status_raw = Column(String)  # status exactly as worded in the report
-    payment_status = Column(String)  # as worded on the report
+    payment_status = Column(String)  # the account's own payment standing, as worded
+    # The report's section label for this account ("Potentially negative",
+    # "Exceptional payment history"). Describes the layout, not the account.
+    report_classification = Column(String)
     balance = Column(Float)
     past_due_amount = Column(Float)
     high_balance = Column(Float)
@@ -69,6 +72,9 @@ class CreditAccount(Base):
     date_last_reported = Column(String)
     date_last_payment = Column(String)
     date_status_updated = Column(String)
+    # "Balance updated" is when the balance was refreshed — a different
+    # field from a "Last reported"/"Date reported" date, never a substitute.
+    balance_updated_date = Column(String)
     terms = Column(String)
     responsibility = Column(String)
     consumer_dispute = Column(String)  # consumer dispute notation, when the report shows one
@@ -94,7 +100,10 @@ class CreditInquiry(Base):
     bureau = Column(String)
     creditor_name = Column(String)
     inquiry_date = Column(String)
-    inquiry_type = Column(String)  # hard | soft
+    inquiry_type = Column(String)  # hard | soft — the inquiry's own classification
+    # The company's industry as the report labels it, e.g. a "Business Type"
+    # of "Bank Credit Cards". A different concept from inquiry_type.
+    business_type = Column(String)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     report = relationship("CreditReport", back_populates="inquiries")

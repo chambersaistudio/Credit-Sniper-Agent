@@ -134,6 +134,15 @@ def validate_proposal(out: ClaimProposalOut, view: AccountView, finding_ids: dic
         corrected = corrected.model_copy(update={
             "has_dispute_ground": False, "recommended_action": "need_more_evidence", "recipients": [],
         })
+    # A field the report doesn't disclose is a question, not an inaccuracy.
+    # It can support a dispute alongside real evidence, never on its own.
+    elif corrected.has_dispute_ground and all(f.severity == Severity.NOT_DISCLOSED for f in supporting):
+        notes.append(
+            "The only support was a field the report doesn't disclose, which isn't an inaccuracy on its own."
+        )
+        corrected = corrected.model_copy(update={
+            "has_dispute_ground": False, "recommended_action": "need_more_evidence", "recipients": [],
+        })
     if not corrected.has_dispute_ground and corrected.recommended_action not in ("no_dispute", "need_more_evidence"):
         corrected = corrected.model_copy(update={"recommended_action": "no_dispute"})
     # "No dispute ground" must mean the records were sufficient to judge the

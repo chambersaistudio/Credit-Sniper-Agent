@@ -10,8 +10,11 @@ from typing import Any
 
 
 class Severity(str, Enum):
-    """Increasing strength. A difference is never automatically an error."""
+    """Increasing strength. A difference is never automatically an error, and
+    a field the report simply doesn't print is not an error at all — it is a
+    question to ask, which is what NOT_DISCLOSED records."""
 
+    NOT_DISCLOSED = "not_disclosed"
     DIFFERENCE = "difference"
     POTENTIAL_INCONSISTENCY = "potential_inconsistency"
     LIKELY_INACCURACY = "likely_inaccuracy"

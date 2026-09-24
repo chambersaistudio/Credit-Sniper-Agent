@@ -25,9 +25,12 @@ def test_positive_old_account_is_never_obsolete():
     assert _rules({"account_status": "open", "date_of_first_delinquency": "01/2010"}) == {}
 
 
-def test_negative_without_dofd_is_only_a_question():
+def test_negative_without_dofd_is_not_disclosed_not_an_inconsistency():
+    # A consumer disclosure that simply doesn't print a DOFD is not evidence
+    # of anything wrong — it ranks below "difference", not as an inconsistency.
     finding = _rules({"account_status": "collection"})["record.missing_dofd"]
-    assert finding.severity == Severity.POTENTIAL_INCONSISTENCY
+    assert finding.severity == Severity.NOT_DISCLOSED
+    assert finding.severity.rank < Severity.DIFFERENCE.rank
 
 
 def test_impossible_dates_are_likely_inaccuracies():

@@ -65,9 +65,19 @@ class ExtractedTradeline(BaseModel):
         description="One of: open, closed, paid, charged_off, collection, transferred, sold, current, "
                     "derogatory, late — or null if unclear"
     )
-    payment_status: str | None
+    payment_status: str | None = Field(
+        description="The account's own payment standing, e.g. 'Current', '30 days late'. NOT a page-level "
+                    "classification like 'Potentially negative' or 'Exceptional payment history'."
+    )
+    report_classification: str | None = Field(
+        description="Any page/section label the report files this account under, e.g. 'Potentially negative' "
+                    "or 'Exceptional payment history'. Never put this in payment_status or status_raw."
+    )
     balance: str | None
-    balance_updated: str | None
+    balance_updated: str | None = Field(
+        description="The 'Balance updated' date. This is when the balance was refreshed — it is NOT the "
+                    "same as a 'Last reported'/'Date reported' field and must not be used as one."
+    )
     credit_limit: str | None
     original_amount: str | None = Field(description="Original balance / original loan amount")
     past_due_amount: str | None
@@ -79,7 +89,10 @@ class ExtractedTradeline(BaseModel):
     date_closed: str | None
     status_updated: str | None
     date_first_delinquency: str | None = Field(description="Only if explicitly printed; never inferred")
-    date_last_reported: str | None
+    date_last_reported: str | None = Field(
+        description="Only a field the report actually labels 'Last reported' / 'Date reported'. "
+                    "If the report only shows 'Balance updated', leave this null."
+    )
     date_last_payment: str | None
     remarks: str | None = Field(description="Remarks/comments printed for this account")
     consumer_dispute: str | None = Field(description="Consumer dispute notation, if the report shows one")
@@ -98,7 +111,14 @@ class ExtractedTradeline(BaseModel):
 class ExtractedInquiry(BaseModel):
     creditor_name: str = Field(description="The company that made the inquiry")
     inquiry_date: str | None
-    inquiry_type: str | None = Field(description="hard/soft only if the document says so, else null")
+    inquiry_type: str | None = Field(
+        description="The inquiry's own classification: 'hard' or 'soft' only if the document states it, "
+                    "else null. This is NOT the industry/business category of the company."
+    )
+    business_type: str | None = Field(
+        description="The company's industry as the report labels it, e.g. a 'Business Type' of "
+                    "'Bank Credit Cards'. A different concept from inquiry_type — never put it there."
+    )
     contact: ContactInfo | None
     source_pages: list[int]
 
