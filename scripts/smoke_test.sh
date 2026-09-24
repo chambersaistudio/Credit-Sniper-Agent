@@ -168,11 +168,24 @@ PY
       pcode=$(curl -sS -o /tmp/cs_pdf -w '%{http_code}' --max-time 60 "$loc" 2>/dev/null || echo 000)
       if [ "$pcode" = "200" ] && head -c4 /tmp/cs_pdf | grep -q '%PDF'; then ok "retrieved the PDF via presigned URL (starts with %PDF)"
       else bad "presigned fetch -> $pcode / not a PDF"; fi
-      # Same object WITHOUT the signature query string → must be denied (private).
+      # Same object WITHOUT the signature query string → must NOT return the
+      # object. The security property is "the bytes are not retrievable without
+      # authorization", not any particular error code — S3/R2 answers an
+      # unsigned request with 400 (InvalidRequest), 403 (AccessDenied), or 404
+      # depending on config, and all are fine. We follow redirects (-L) so a
+      # redirect can't smuggle out a public copy, then FAIL only if the object
+      # actually came back (a PDF body, the exact object bytes, or any 2xx).
       bare="${loc%%\?*}"
-      bcode=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 45 "$bare" 2>/dev/null || echo 000)
-      if [ "$bcode" = "403" ] || [ "$bcode" = "401" ]; then ok "unsigned object URL is NOT public ($bcode)"
-      else bad "unsigned object URL returned $bcode (expected 403/401 — bucket may be public!)"; fi
+      bcode=$(curl -sS -L -o /tmp/cs_unsigned -w '%{http_code}' --max-time 45 "$bare" 2>/dev/null || echo 000)
+      if head -c4 /tmp/cs_unsigned 2>/dev/null | grep -q '%PDF'; then
+        bad "unsigned URL returned a PDF (HTTP $bcode) — the object is PUBLIC"
+      elif cmp -s /tmp/cs_unsigned /tmp/cs_pdf; then
+        bad "unsigned URL returned the exact object bytes (HTTP $bcode) — the object is PUBLIC"
+      elif [ "${bcode:0:1}" = "2" ]; then
+        bad "unsigned URL returned success HTTP $bcode without a signature — treat as PUBLIC/leaky; inspect the response"
+      else
+        ok "unsigned object URL is NOT public (rejected HTTP $bcode, no object returned)"
+      fi
     else
       # Local storage (no R2) streams bytes instead of redirecting.
       req GET "/api/reports/$REPORT_ID/file" "$TOKEN_A"; code=$CODE
