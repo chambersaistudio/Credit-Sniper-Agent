@@ -147,6 +147,19 @@ features land.
 
 ## 5. Verify Vercel → Clerk → Railway → Postgres
 
+Run the automated smoke test from a machine that can reach the API (steps
+1–13, uploading only a synthetic PDF):
+
+```bash
+API_BASE=https://<railway-domain> \
+TOKEN_A=<Clerk JWT from `await window.Clerk.session.getToken()` in the browser console> \
+TOKEN_B=<a second signed-in account's JWT, optional> \
+WEB_ORIGIN=https://<your-vercel-domain> \
+./scripts/smoke_test.sh
+```
+
+Or check by hand:
+
 1. `https://<railway-domain>/api/health` → `{"status":"ok",…}`: the process is up.
 2. `https://<railway-domain>/api/health/ready` → `"database":"ok"`,
    `"schema_revision":"0003"`, `"storage_backend"`, `"ai_configured":true`,
