@@ -52,11 +52,13 @@ _DEFAULTS: dict[ModelTier, TierConfig] = {
         provider="anthropic", model="claude-opus-5", effort="max", refusal_fallback=True, max_tokens=32000
     ),
     # Vision-capable models that accept a PDF directly. Correctness is worth
-    # more than tokens here: a misread report poisons everything downstream.
-    # Both are env-overridable (AI_DOCUMENT_EXTRACTION_MODEL / _AUDIT_MODEL) —
-    # confirm the exact model id available to your OpenAI account.
-    ModelTier.DOCUMENT_EXTRACTION: TierConfig(provider="openai", model="gpt-5", max_tokens=32000),
-    ModelTier.DOCUMENT_AUDIT: TierConfig(provider="openai", model="gpt-5", max_tokens=16000),
+    # more than tokens here: a misread report poisons everything downstream,
+    # so both passes start on Sol. The explicit "-sol" id (rather than the
+    # "gpt-5.6" alias) keeps runs reproducible. Env-overridable via
+    # AI_DOCUMENT_EXTRACTION_MODEL / AI_DOCUMENT_AUDIT_MODEL — once we have a
+    # benchmark, Terra is the candidate cheaper extractor with Sol auditing.
+    ModelTier.DOCUMENT_EXTRACTION: TierConfig(provider="openai", model="gpt-5.6-sol", max_tokens=32000),
+    ModelTier.DOCUMENT_AUDIT: TierConfig(provider="openai", model="gpt-5.6-sol", max_tokens=16000),
 }
 
 
@@ -88,6 +90,11 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-8": (5.00, 25.00),  # server-side refusal fallback target
     "claude-opus-5-5": (4.00, 20.00),
     "claude-fable-5-1": (10.00, 50.00),
+    # Document understanding (OpenAI). Reading a PDF at detail=high is
+    # token-heavy, so these matter for cost-per-report.
+    "gpt-5.6-sol": (4.00, 20.00),
+    "gpt-5.6-terra": (2.00, 12.00),
+    "gpt-5.6-luna": (0.20, 1.20),
 }
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25

@@ -60,6 +60,26 @@ def fake_ai():
 requires_db = pytest.mark.skipif(not TEST_DATABASE_URL, reason="set TEST_DATABASE_URL to run integration tests")
 
 
+async def mark_reports_verified() -> None:
+    """Promote every stored report to VERIFIED.
+
+    Parser-path ingestion is capped at NEEDS_AUDIT by design: only a
+    document-model reading of the original PDF that survives its independent
+    audit can be VERIFIED, and dispute evaluation requires VERIFIED. Lifecycle
+    tests here upload through the parser path, so they promote their reports
+    to stand in for a real AI-native ingestion. That ingestion is covered end
+    to end in tests/test_document_ingestion_flow.py.
+    """
+    from sqlalchemy import update
+
+    from app.database import async_session_maker
+    from app.models.credit_report import CreditReport
+
+    async with async_session_maker() as session:
+        await session.execute(update(CreditReport).values(extraction_status="verified"))
+        await session.commit()
+
+
 @pytest.fixture
 async def db_ready():
     """Fresh schema for each integration test, built by the real migrations."""

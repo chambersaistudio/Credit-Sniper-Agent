@@ -162,11 +162,13 @@ async def _ingest_with_document_model(
 async def _ingest_with_parser(
     parsed: dict[str, Any], raw_text: str, user: User, user_id: uuid.UUID
 ) -> IngestOutcome:
-    """Fallback path when no document-understanding provider is configured.
+    """Fallback path when no document-understanding provider is configured,
+    or when the document model failed.
 
-    The deterministic parser (plus the older source-grounded text fallback)
-    still runs, but it only reaches VERIFIED when the completeness gate
-    passes — never merely because it returned some rows."""
+    This path can NEVER reach VERIFIED. VERIFIED means the original PDF was
+    read by the document model, independently audited against that same PDF,
+    and reconciled — none of which happened here. A clean deterministic parse
+    caps at NEEDS_AUDIT, which still blocks dispute analysis."""
     raw_accounts = parsed.get("accounts_raw", [])
     raw_inquiries = parsed.get("inquiries_raw", [])
     method = "parser"
@@ -198,15 +200,19 @@ async def _ingest_with_parser(
 
     if not raw_accounts:
         status = ExtractionStatus.FAILED
+        reasons = quality.reasons
     elif quality.complete:
-        status = ExtractionStatus.VERIFIED
+        # Capped deliberately: nothing verified this against the original PDF.
+        status = ExtractionStatus.NEEDS_AUDIT
+        reasons = ["Read by the deterministic parser only — not verified against the original document."]
     else:
         status = ExtractionStatus.EXTRACTION_INCOMPLETE
+        reasons = quality.reasons
 
     return IngestOutcome(
         accounts=raw_accounts, inquiries=raw_inquiries, quality=quality, status=status, method=method,
         bureau=parsed.get("bureau", "unknown"), credit_score=parsed.get("credit_score"),
-        report_date=parsed.get("report_date"), reasons=quality.reasons,
+        report_date=parsed.get("report_date"), reasons=reasons,
         ungrounded_values_dropped=dropped, redactions=redactions,
     )
 

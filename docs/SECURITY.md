@@ -59,9 +59,13 @@ document access behind authorization (above). Still open:
 2. Application-level encryption for `credit_reports.raw_text`, `users.date_of_birth`
    and `users.ssn_last_four` (envelope encryption with a KMS-managed key), so a
    database dump alone doesn't expose them.
-3. A retention policy and a "delete my data" endpoint that removes reports,
+3. Zero Data Retention (or an equivalent enterprise control) on the OpenAI
+   project that receives the original PDFs. Until then, `store=false` stops
+   application-state persistence but abuse-monitoring retention of up to 30
+   days can still apply.
+4. A retention policy and a "delete my data" endpoint that removes reports,
    files, and derived records together.
-4. Rate limiting on the upload and evaluation endpoints (evaluation spends
+5. Rate limiting on the upload and evaluation endpoints (evaluation spends
    money). Not yet implemented; a per-user/IP limiter (e.g. slowapi, or a
    gateway rule) is the intended home since these routes are authenticated.
 
@@ -77,8 +81,13 @@ read the authoritative document. Controls on that path:
 
 - The original stays private in R2; there is no public object URL, and the
   bytes handed to the provider are the ones read back from private storage.
-- `store=false` on every request and no Conversation object, so the provider
-  retains no copy of the report.
+- `store=false` on every request and no Conversation object. This prevents
+  Responses **application-state persistence** — it is *not* zero retention.
+  API data is not used for training by default, but OpenAI's standard abuse
+  monitoring may retain request data for **up to 30 days** unless the project
+  is approved and configured for **Zero Data Retention**. Treat that as the
+  current posture for real consumer reports, and pursue ZDR before this
+  serves anyone but its owner.
 - The PDF is sent inline as base64 in the request — not uploaded as a
   persistent Files object — and is held in memory, not written to disk.
 - Nothing about the document is logged: not the bytes, the base64 payload,

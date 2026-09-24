@@ -288,3 +288,26 @@ async def test_parser_cross_check_is_recorded_but_not_authoritative(client, docu
     assert cross_check["document_accounts"] == 15
     assert cross_check["agrees_on_count"] is False
     assert body["extraction_status"] == "verified"
+
+
+async def test_verified_document_ingestion_permits_evaluation(client, document_ai, fake_ai):
+    """The positive direction: a document reading that survives its audit is
+    VERIFIED, and only then may dispute analysis run."""
+    from app.services.reasoning_engine import ClaimProposalOut
+
+    document_ai()
+    # The reasoning engine runs on the text tier; stand in for it.
+    reasoning = fake_ai(lambda output_type, prompt, config: ClaimProposalOut(
+        has_dispute_ground=False, reasoning="Reported consistently.", supporting_finding_ids=[],
+        disputed_fields=[], recipients=[], legal_basis=[], requested_remedy=None,
+        additional_evidence_needed=[], recommended_action="no_dispute", confidence=0.9,
+    ))
+
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    assert body["extraction_status"] == "verified"
+
+    account = next(a for a in (await client.get("/api/accounts/")).json()
+                   if a["creditor_name"] == "CAINE & WEINER")
+    evaluation = (await client.post(f"/api/accounts/{account['id']}/evaluate")).json()
+    assert evaluation["recommended_action"] != "need_more_evidence"
+    assert len(reasoning.calls) == 1  # the reasoning engine actually ran

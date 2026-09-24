@@ -220,8 +220,11 @@ class OpenAIProvider:
                 input=self.build_document_input(prompt, document, filename, detail),
                 text_format=output_type,
                 max_output_tokens=max_tokens,
-                # Nothing is retained provider-side: no stored response and no
-                # Conversation object carrying the consumer's report.
+                # No Responses application-state persistence, and no
+                # Conversation object carrying the consumer's report. This is
+                # not the same as zero retention: OpenAI's standard abuse
+                # monitoring may still retain request data for up to 30 days
+                # unless the project is approved for Zero Data Retention.
                 store=False,
             )
         except self._openai.LengthFinishReasonError as e:

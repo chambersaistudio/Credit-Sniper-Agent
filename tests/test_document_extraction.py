@@ -245,3 +245,19 @@ async def test_document_content_never_reaches_the_logs(caplog, monkeypatch):
     assert secret not in logged
     assert base64.b64encode(document).decode()[:24] not in logged
     assert "%PDF" not in logged
+
+
+def test_document_model_costs_are_estimated():
+    """Document calls are token-heavy; they must land in the usage log with a
+    cost, not as an unpriced unknown model."""
+    from app.services.ai.config import estimate_cost_usd
+
+    # 1M input + 1M output at the Sol rates.
+    assert estimate_cost_usd("gpt-5.6-sol", 1_000_000, 1_000_000) == 24.0
+    assert estimate_cost_usd("gpt-5.6-terra", 1_000_000, 1_000_000) == 14.0
+    assert estimate_cost_usd("gpt-5.6-luna", 1_000_000, 1_000_000) == 1.4
+    # The defaults both resolve to a priced model.
+    for tier in (ModelTier.DOCUMENT_EXTRACTION, ModelTier.DOCUMENT_AUDIT):
+        config = resolve_tier(tier)
+        assert config.model == "gpt-5.6-sol"
+        assert estimate_cost_usd(config.model, 1000, 100) is not None

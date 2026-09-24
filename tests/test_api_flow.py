@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from app.services.ai import add_usage_listener
 from app.services.ai_extraction import ExtractedAccount, ExtractedInquiry, ExtractedReport
 from app.services.reasoning_engine import ClaimProposalOut
-from tests.conftest import requires_db
+from tests.conftest import mark_reports_verified, requires_db
 
 pytestmark = requires_db
 
@@ -163,6 +163,9 @@ async def test_full_consumer_flow(client):
     equifax_record = next(r for r in capital_one["records"] if r["bureau"] == "equifax")
     assert (equifax_record["balance"], equifax_record["high_balance"]) == (3450.0, 5000.0)
 
+    # Parser ingestion caps at NEEDS_AUDIT; stand in for a verified
+    # AI-native ingestion so the lifecycle can proceed.
+    await mark_reports_verified()
     evaluation = (await client.post(f"/api/accounts/{capital_one['id']}/evaluate")).json()
     assert evaluation["has_dispute_ground"] and evaluation["evidence"]
 
@@ -230,6 +233,7 @@ async def test_reevaluation_supersedes_and_stale_claims_are_rejected(client):
     await _upload(client, EQUIFAX)
     await _upload(client, EXPERIAN)
     account = next(a for a in (await client.get("/api/accounts/")).json() if a["creditor_name"] == "CAPITAL ONE BANK")
+    await mark_reports_verified()
     first = (await client.post(f"/api/accounts/{account['id']}/evaluate")).json()
     await client.post(f"/api/accounts/{account['id']}/evaluate")
     stale = await client.post("/api/cases/", json={"claim_ids": [first["id"]], "recipient": "equifax"})
@@ -241,6 +245,7 @@ async def test_no_dispute_ground_means_no_case(client):
     await _upload(client, clean)
     account = (await client.get("/api/accounts/")).json()[0]
     assert account["findings"] == []
+    await mark_reports_verified()
     evaluation = (await client.post(f"/api/accounts/{account['id']}/evaluate")).json()
     assert evaluation["recommended_action"] == "no_dispute"
     refused = await client.post("/api/cases/", json={"claim_ids": [evaluation["id"]], "recipient": "experian"})
@@ -270,3 +275,17 @@ async def test_upload_rejects_non_pdf_and_ambiguous_bureau(client):
         "/api/reports/upload", files={"file": ("r.pdf", _pdf("Credit report\nCreditor: X\nAccount Number: 1234"), "application/pdf")},
     )
     assert ambiguous.status_code == 422
+
+
+async def test_parser_ingestion_never_reaches_verified(client):
+    """A clean deterministic parse is still only NEEDS_AUDIT: nothing read the
+    original PDF and audited it, so dispute analysis stays blocked."""
+    report = await _upload(client, EQUIFAX)
+    assert report["extraction_status"] == "needs_audit"
+    assert report["extraction_complete"] is True  # the parse itself was complete
+    assert any("not verified against the original document" in w for w in report["warnings"])
+
+    account = (await client.get("/api/accounts/")).json()[0]
+    evaluation = (await client.post(f"/api/accounts/{account['id']}/evaluate")).json()
+    assert evaluation["recommended_action"] == "need_more_evidence"
+    assert evaluation["has_dispute_ground"] is False

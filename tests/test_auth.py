@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-from tests.conftest import requires_db
+from tests.conftest import mark_reports_verified, requires_db
 from tests.test_api_flow import EQUIFAX, _responder
 
 pytestmark = requires_db
@@ -152,6 +152,7 @@ async def test_cross_user_access_is_denied_without_leaking_existence(client):
     report = await _upload(client, a)
     report_id = report["report_id"]
     account = (await client.get("/api/accounts/", headers=_headers(a))).json()[0]
+    await mark_reports_verified()
     evaluation = (await client.post(f"/api/accounts/{account['id']}/evaluate", headers=_headers(a))).json()
     case = (await client.post(
         "/api/cases/", json={"claim_ids": [evaluation["id"]], "recipient": "equifax"}, headers=_headers(a)
@@ -193,6 +194,7 @@ async def test_lifecycle_works_under_authentication(client):
     a = "lifecycle_user"
     report = await _upload(client, a)
     account = (await client.get("/api/accounts/", headers=_headers(a))).json()[0]
+    await mark_reports_verified()
     evaluation = (await client.post(f"/api/accounts/{account['id']}/evaluate", headers=_headers(a))).json()
     assert evaluation["has_dispute_ground"]
     case = (await client.post(
