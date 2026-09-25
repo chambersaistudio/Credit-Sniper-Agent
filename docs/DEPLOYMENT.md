@@ -122,6 +122,21 @@ With more than one API instance, the worker runs in each of them and they can
 pick up the same report. Run exactly one instance, or set
 `EXTRACTION_WORKER_ENABLED=false` on all but one.
 
+**Operator control plane.** Production QA runs over HTTPS rather than a shell:
+`/api/operator/*` exposes a fixed allowlist of named operations, backed by a
+durable `operator_jobs` queue. See `docs/operator-control-plane.md` for the
+endpoint list, auth design and Codex configuration. Environment:
+
+| Variable | Value | Required |
+|---|---|---|
+| `OPERATOR_AGENT_TOKEN` | a long random secret for the review agent; unset disables machine access | for agent access |
+| `OPERATOR_AGENT_LABEL` | `codex` — appears in audit records, not a secret | no |
+| `OPERATOR_WORKER_ENABLED` | `true` (default); off leaves operator jobs queued | no |
+| `OPERATOR_WORKER_POLL_SECONDS` | `2` (default) | no |
+| `OPERATOR_RATE_LIMIT_PER_MINUTE` | `60` (default) | no |
+| `OPERATOR_PAID_RATE_LIMIT_PER_HOUR` | `30` (default) | no |
+| `OPERATOR_JOB_LEASE_SECONDS` | `900` (default) | no |
+
 **Operator commands on Railway.** The image is built from `backend/`, so the
 repository's `scripts/` are not in `/app`. The same commands ship as modules:
 

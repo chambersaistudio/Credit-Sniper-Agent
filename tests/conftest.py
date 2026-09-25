@@ -17,6 +17,9 @@ os.environ.setdefault("DB_NULL_POOL", "1")
 # explicitly (drain_extraction_queue) so each pass is observable and no loop
 # races the assertions.
 os.environ.setdefault("EXTRACTION_WORKER_ENABLED", "0")
+# Same for the operator queue: tests drive it explicitly so each job's
+# execution is observable and no loop races an assertion.
+os.environ.setdefault("OPERATOR_WORKER_ENABLED", "0")
 os.environ.setdefault("UPLOAD_DIR", tempfile.mkdtemp(prefix="credit-sniper-test-"))
 
 from app.services.ai import clear_usage_listeners, register_provider  # noqa: E402
@@ -59,6 +62,23 @@ def fake_ai():
     _instances.clear()
     _instances.update(saved)
     clear_usage_listeners()
+
+
+async def drain_operator_queue(limit: int = 20) -> list[str]:
+    """Run the operator worker until its queue is empty.
+
+    Queueing a job returns 202 and stores a row; nothing executes inside the
+    request. Tests call this where production would have the worker pick it
+    up, then read the finished job."""
+    from app.services.operator.jobs import claim_next, run_job
+
+    statuses = []
+    for _ in range(limit):
+        job_id = await claim_next()
+        if job_id is None:
+            break
+        statuses.append(await run_job(job_id))
+    return statuses
 
 
 async def drain_extraction_queue(limit: int = 50) -> list[str]:

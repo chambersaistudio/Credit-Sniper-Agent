@@ -288,6 +288,9 @@ details[open] > summary::after { content: '▴'; }
 
 /* Background extraction progress. Determinate-ish: it tracks pipeline stages,
    not a guessed percentage of work. */
+/* Operator tooling: a card that is also a button needs the button reset. */
+.text-left { text-align: left; background: none; border: 0; color: inherit; font: inherit; padding: 0; }
+
 .progress-track { height: 6px; border-radius: 999px; background: var(--border-strong); overflow: hidden; }
 .progress-bar { height: 100%; border-radius: 999px; background: var(--violet-light); transition: width 400ms ease; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -11,6 +11,7 @@ import Cases from './pages/Cases'
 import CaseDetail from './pages/CaseDetail'
 import Activity from './pages/Activity'
 import Profile from './pages/Profile'
+import Operator from './pages/Operator'
 
 const NAV = [
   { to: '/', icon: '⌂', label: 'Home', end: true },
@@ -52,6 +53,8 @@ function Shell() {
           <Route path="/cases/:id" element={<CaseDetail />} />
           <Route path="/activity" element={<Activity />} />
           <Route path="/profile" element={<Profile />} />
+          {/* Internal only: no nav entry, reachable by URL. */}
+          <Route path="/operator" element={<Operator />} />
         </Routes>
       </div>
 

@@ -77,6 +77,20 @@ export const api = {
   getAccount: (id) => request(`/accounts/${id}`),
   evaluateAccount: (id) => request(`/accounts/${id}/evaluate`, { method: 'POST' }),
 
+  // ── Operator control plane (admin only) ───────────────────────────
+  // Authenticated as the signed-in user; the machine credential belongs to
+  // the review agent and is never present in a browser build.
+  operatorOperations: () => request('/operator/operations'),
+  operatorReports: (limit = 20) => request(`/operator/reports?limit=${limit}`),
+  operatorBatchPlan: (id) => request(`/operator/reports/${id}/batch-plan`),
+  operatorCheckpoint: (id) => request(`/operator/reports/${id}/checkpoint`),
+  operatorDiagnosis: (id) => request(`/operator/reports/${id}/diagnosis`),
+  operatorJobs: (reportId) =>
+    request(`/operator/jobs${reportId ? `?report_id=${reportId}` : ''}`),
+  operatorJob: (jobId) => request(`/operator/jobs/${jobId}`),
+  queueBenchmark: (body) =>
+    request('/operator/jobs/benchmark-batch', { method: 'POST', body }),
+
   listCases: () => request('/cases/'),
   getCase: (id) => request(`/cases/${id}`),
   openCase: (claimIds, recipient, furnisher = {}) =>

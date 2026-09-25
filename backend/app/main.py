@@ -10,10 +10,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from app.api import accounts, cases, dashboard, reports, users
+from app.api import accounts, cases, dashboard, operator, reports, users
 from app.config import settings
 from app.database import engine, run_migrations
 from app.services.extraction_jobs import worker_loop
+from app.services.operator.jobs import worker_loop as operator_worker_loop
 from app.services.ai import (
     AIConfigurationError, AIError, AIRefusalError, AIResponseError, add_usage_listener,
 )
@@ -44,16 +45,21 @@ async def lifespan(app: FastAPI):
     # Extraction is a durable background job, not part of an HTTP request.
     # The queue lives in Postgres, so an interrupted job resumes from its last
     # checkpoint on the next boot instead of paying for the work again.
-    worker = None
+    workers = []
     if settings.extraction_worker_enabled:
-        worker = asyncio.create_task(worker_loop(settings.extraction_worker_poll_seconds))
+        workers.append(asyncio.create_task(worker_loop(settings.extraction_worker_poll_seconds)))
+    # The operator queue is drained separately from the consumer one: operator
+    # work is manual, occasional and paid, and must neither compete with nor
+    # be starved by the queue that serves uploads.
+    if settings.operator_worker_enabled:
+        workers.append(asyncio.create_task(operator_worker_loop()))
     try:
         yield
     finally:
-        if worker is not None:
-            worker.cancel()
+        for task in workers:
+            task.cancel()
             with suppress(asyncio.CancelledError):
-                await worker
+                await task
 
 
 app = FastAPI(title="Credit Sniper", version=APP_VERSION, lifespan=lifespan)
@@ -67,10 +73,10 @@ app.add_middleware(
     allow_origin_regex=settings.allowed_origin_regex or None,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Token", "X-Operator-Token"],
 )
 
-for module in (reports, accounts, cases, dashboard, users):
+for module in (reports, accounts, cases, dashboard, users, operator):
     app.include_router(module.router)
 
 

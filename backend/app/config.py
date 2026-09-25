@@ -65,6 +65,31 @@ class Settings(BaseSettings):
     extraction_worker_enabled: bool = True
     extraction_worker_poll_seconds: float = 2.0
 
+    # ── Operator control plane ───────────────────────────────────
+    # Production QA driven over HTTPS instead of a shell on the box. Every
+    # operation is allowlisted by name; there is no command, SQL or code path.
+    #
+    # The machine credential for an operator agent. A secret: it lives only in
+    # the environment, is compared in constant time, is never logged and is
+    # never returned by any endpoint. It is valid ONLY for /api/operator/*.
+    # Empty disables machine access entirely, leaving signed-in admins only.
+    operator_agent_token: str = ""
+    # A label for that credential in audit records, so a job says who ran it
+    # without any part of the token appearing anywhere.
+    operator_agent_label: str = "agent"
+    # Runs the operator job worker in this process. Off in tests, which drive
+    # the queue explicitly.
+    operator_worker_enabled: bool = True
+    operator_worker_poll_seconds: float = 2.0
+    # Requests per minute per principal against /api/operator/*.
+    operator_rate_limit_per_minute: int = 60
+    # Paid jobs per hour per principal — a second, slower limit, because the
+    # cost of a runaway loop is money rather than load.
+    operator_paid_rate_limit_per_hour: int = 30
+    # A job claimed but never finished (the worker was killed mid-flight) is
+    # reclaimed after this long. A PAID job is failed rather than re-run.
+    operator_job_lease_seconds: int = 900
+
     database_url: str = LOCAL_DATABASE_URL
     # Apply pending migrations when the app boots. Safe with one instance;
     # with several, run `alembic upgrade head` as a pre-deploy step instead
