@@ -22,7 +22,7 @@ from typing import Any
 from app.config import settings
 from app.services.ai import AIError, ModelTier, generate_document
 from app.services.document_extraction.schema import AuditReport, CreditReportExtraction
-from app.services.document_extraction.status import ExtractionStatus
+from app.services.document_extraction.status import OPERATIONAL_REASONS, ExtractionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ class DocumentExtractionResult:
     # Operator detail: the provider's own error. Recorded for logs and admin
     # telemetry and deliberately never surfaced in a consumer-facing response.
     provider_error: str | None = None
+    # The classified failure, when a pass failed. Operator-only, like the above.
+    failure: "PassFailure | None" = None
 
     def audit_to_dict(self) -> dict[str, Any]:
         """What we persist about the audit — findings and counts, never the
@@ -112,8 +114,9 @@ class DocumentExtractionResult:
             "audit": self.audit.model_dump() if self.audit else None,
             # Kept visible, but they did not hold the report back.
             "set_aside": [{**f.model_dump(), "set_aside_because": why} for f, why in benign],
-            # Operator-only; the report endpoints never return this field.
+            # Operator-only; the report endpoints never return these fields.
             "provider_error": self.provider_error,
+            "failure": self.failure.to_dict() if self.failure else None,
         }
 
 
@@ -273,10 +276,74 @@ def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> 
     return ExtractionStatus.VERIFIED, []
 
 
+@dataclass
+class PassFailure:
+    """One failed expensive pass, kept in operator vocabulary.
+
+    Everything here is operator-only. The consumer sees copy chosen from the
+    status alone (ExtractionStatus.OPERATIONAL_MESSAGES); none of these
+    fields — provider text, token counts, response ids — is ever returned by
+    a consumer-facing endpoint."""
+
+    pass_name: str
+    status: ExtractionStatus
+    error_class: str
+    detail: str
+    # Populated when the provider billed us anyway.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int | None = None
+    max_tokens: int | None = None
+    latency_ms: float = 0.0
+    response_id: str | None = None
+
+    @classmethod
+    def from_error(cls, pass_name: str, error: AIError) -> "PassFailure":
+        usage = getattr(error, "usage", None)
+        return cls(
+            pass_name=pass_name,
+            status=ExtractionStatus.for_error(error),
+            error_class=type(error).__name__,
+            detail=str(error),
+            input_tokens=usage.input_tokens if usage else 0,
+            output_tokens=usage.output_tokens if usage else 0,
+            reasoning_tokens=usage.reasoning_tokens if usage else None,
+            max_tokens=usage.max_tokens if usage else None,
+            latency_ms=usage.latency_ms if usage else 0.0,
+            response_id=usage.response_id if usage else None,
+        )
+
+    @property
+    def billed(self) -> bool:
+        return bool(self.input_tokens or self.output_tokens)
+
+    @property
+    def cost_note(self) -> str:
+        if not self.billed:
+            return " (nothing billed)"
+        reasoning = f", {self.reasoning_tokens} reasoning" if self.reasoning_tokens else ""
+        return (f" (BILLED: {self.input_tokens} in / {self.output_tokens} out{reasoning}"
+                f"{f', budget {self.max_tokens}' if self.max_tokens else ''})")
+
+    # Kept on the report for operators; never returned to a consumer.
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pass": self.pass_name, "status": self.status.value, "error_class": self.error_class,
+            "detail": self.detail, "billed": self.billed,
+            "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens, "max_output_tokens": self.max_tokens,
+            "latency_ms": round(self.latency_ms, 1), "response_id": self.response_id,
+        }
+
+
 async def run_extractor(
     document: bytes, *, filename: str = "credit-report.pdf", context: dict[str, Any] | None = None
-) -> tuple[CreditReportExtraction | None, str | None, str | None]:
-    """Pass 1 on its own. Returns (extraction, model, provider_error)."""
+) -> tuple[CreditReportExtraction | None, str | None, "PassFailure | None"]:
+    """Pass 1 on its own. Returns (extraction, model, failure).
+
+    The failure is classified rather than flattened: a provider outage and a
+    response that blew the token budget are different events with different
+    costs, and only one of them is worth retrying."""
     try:
         generation = await generate_document(
             ModelTier.DOCUMENT_EXTRACTION,
@@ -290,15 +357,17 @@ async def run_extractor(
             detail=settings.document_extraction_detail,
         )
     except AIError as e:
-        logger.warning("Document extraction unavailable (%s): %s", type(e).__name__, e)
-        return None, None, f"{type(e).__name__}: {e}"
+        failure = PassFailure.from_error("extract", e)
+        logger.warning("Document extraction failed (%s -> %s): %s%s",
+                       type(e).__name__, failure.status.value, e, failure.cost_note)
+        return None, None, failure
     return generation.output, generation.model, None
 
 
 async def run_auditor(
     document: bytes, extraction: CreditReportExtraction, *,
     filename: str = "credit-report.pdf", context: dict[str, Any] | None = None,
-) -> tuple[AuditReport | None, str | None, str | None]:
+) -> tuple[AuditReport | None, str | None, "PassFailure | None"]:
     """Pass 2 on its own, so a failed audit never re-runs the extractor."""
     try:
         generation = await generate_document(
@@ -313,8 +382,10 @@ async def run_auditor(
             detail=settings.document_extraction_detail,
         )
     except AIError as e:
-        logger.warning("Document audit unavailable (%s): %s", type(e).__name__, e)
-        return None, None, f"{type(e).__name__}: {e}"
+        failure = PassFailure.from_error("audit", e)
+        logger.warning("Document audit failed (%s -> %s): %s%s",
+                       type(e).__name__, failure.status.value, e, failure.cost_note)
+        return None, None, failure
     return generation.output, generation.model, None
 
 
@@ -343,11 +414,14 @@ async def extract_document(
         # about the report's contents, so this must not be reported as a
         # problem with the consumer's PDF. The provider's own message goes to
         # the logs and the audit record, never to the consumer.
-        logger.warning("Document extraction unavailable (%s): %s", type(e).__name__, e)
+        failure = PassFailure.from_error("extract", e)
+        logger.warning("Document extraction failed (%s -> %s): %s%s",
+                       type(e).__name__, failure.status.value, e, failure.cost_note)
         return DocumentExtractionResult(
-            None, None, ExtractionStatus.PROVIDER_UNAVAILABLE,
-            ["AI extraction was unavailable, so the document was never analyzed."],
+            None, None, failure.status,
+            [OPERATIONAL_REASONS[failure.status]],
             provider_error=f"{type(e).__name__}: {e}",
+            failure=failure,
         )
 
     extraction = first.output

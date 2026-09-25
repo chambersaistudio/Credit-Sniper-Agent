@@ -19,6 +19,7 @@ from app.services.ai.errors import (
     AIProviderError,
     AIRefusalError,
     AIResponseError,
+    ProviderUsage,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -209,6 +210,33 @@ class OpenAIProvider:
             ],
         }]
 
+    @staticmethod
+    def _response_usage(response, latency_ms: float, max_tokens: int) -> ProviderUsage:
+        """What this response cost us, whether or not it was usable.
+
+        A response that stopped at the token budget is billed in full, so this
+        is read on the failure paths too — otherwise the most expensive
+        failures are the ones that record zero spend."""
+        usage = getattr(response, "usage", None)
+        cached = 0
+        reasoning = None
+        if usage:
+            details = getattr(usage, "input_tokens_details", None)
+            cached = (getattr(details, "cached_tokens", 0) or 0) if details else 0
+            out_details = getattr(usage, "output_tokens_details", None)
+            if out_details is not None:
+                reasoning = getattr(out_details, "reasoning_tokens", None)
+        return ProviderUsage(
+            input_tokens=((getattr(usage, "input_tokens", 0) or 0) - cached) if usage else 0,
+            output_tokens=(getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+            cache_read_tokens=cached,
+            cache_write_tokens=0,
+            latency_ms=latency_ms,
+            response_id=getattr(response, "id", None),
+            max_tokens=max_tokens,
+            reasoning_tokens=reasoning,
+        )
+
     async def generate_document(
         self, config, *, system, prompt, document, filename, output_type, max_tokens, detail="high"
     ):
@@ -228,7 +256,10 @@ class OpenAIProvider:
                 store=False,
             )
         except self._openai.LengthFinishReasonError as e:
-            raise AIResponseError(f"Response truncated at max_output_tokens={max_tokens}") from e
+            raise AIResponseError(
+                f"Document response truncated at max_output_tokens={max_tokens}",
+                usage=ProviderUsage(latency_ms=(time.monotonic() - start) * 1000, max_tokens=max_tokens),
+            ) from e
         except self._openai.AuthenticationError as e:
             raise AIConfigurationError(f"OpenAI authentication failed: {e.message}") from e
         except self._openai.APIStatusError as e:
@@ -243,9 +274,20 @@ class OpenAIProvider:
             raise AIResponseError(f"Model output failed schema validation: {e}") from e
         latency_ms = (time.monotonic() - start) * 1000
 
+        # Everything below this point was BILLED. Each failure carries the
+        # usage it consumed so the cost of failing is recorded, not lost.
+        billed = self._response_usage(response, latency_ms, max_tokens)
+
         if getattr(response, "status", None) == "incomplete":
             reason = getattr(getattr(response, "incomplete_details", None), "reason", "unknown")
-            raise AIResponseError(f"Document response incomplete: {reason}")
+            # On the Responses API max_output_tokens caps reasoning AND the
+            # answer together, so a reasoning model can spend the whole budget
+            # thinking and return nothing usable. Say what it spent.
+            spent = (f"; spent {billed.output_tokens} output token(s)"
+                     f"{f' ({billed.reasoning_tokens} reasoning)' if billed.reasoning_tokens else ''}"
+                     f" of max_output_tokens={max_tokens}")
+            raise AIResponseError(f"Document response incomplete: {reason}{spent}", usage=billed)
+
         parsed = getattr(response, "output_parsed", None)
         if parsed is None:
             refusal = next(
@@ -254,21 +296,17 @@ class OpenAIProvider:
                 None,
             )
             if refusal:
-                raise AIRefusalError(f"Model declined the document request: {refusal}")
-            raise AIResponseError("Model returned no structured output for the document")
+                raise AIRefusalError(f"Model declined the document request: {refusal}", usage=billed)
+            raise AIResponseError("Model returned no structured output for the document", usage=billed)
 
-        usage = response.usage
-        cached = 0
-        if usage and getattr(usage, "input_tokens_details", None):
-            cached = getattr(usage.input_tokens_details, "cached_tokens", 0) or 0
         return ProviderResult(
             output=parsed,
             provider=self.name,
             model=response.model,
-            input_tokens=((usage.input_tokens or 0) - cached) if usage else 0,
-            output_tokens=(usage.output_tokens or 0) if usage else 0,
-            cache_read_tokens=cached,
-            cache_write_tokens=0,
+            input_tokens=billed.input_tokens,
+            output_tokens=billed.output_tokens,
+            cache_read_tokens=billed.cache_read_tokens,
+            cache_write_tokens=billed.cache_write_tokens,
             latency_ms=latency_ms,
         )
 

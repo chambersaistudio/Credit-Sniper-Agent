@@ -16,6 +16,7 @@ from app.services.ai.errors import (
     AIProviderError,
     AIRefusalError,
     AIResponseError,
+    ProviderUsage,
 )
 from app.services.ai.providers import (
     DocumentUnsupported,
@@ -109,6 +110,9 @@ async def generate_document(
         )
     except AIError as e:
         record.error = f"{type(e).__name__}: {e}"
+        # A truncated or unparseable response was still billed. Record what it
+        # cost, or the most expensive failures are the ones that look free.
+        _apply_usage(record, e.usage)
         await emit(record)
         raise
 
@@ -126,9 +130,31 @@ async def generate_document(
     return Generation(output=result.output, tier=tier, model=result.model)
 
 
+def _apply_usage(record: UsageRecord, usage) -> None:
+    """Fold a failed call's billed usage into its usage record."""
+    if usage is None:
+        return
+    record.input_tokens = usage.input_tokens
+    record.output_tokens = usage.output_tokens
+    record.cache_read_tokens = usage.cache_read_tokens
+    record.cache_write_tokens = usage.cache_write_tokens
+    record.latency_ms = usage.latency_ms
+    record.estimated_cost_usd = estimate_cost_usd(
+        record.model, usage.input_tokens, usage.output_tokens,
+        usage.cache_read_tokens, usage.cache_write_tokens,
+    )
+    # Operator-only detail for diagnosing an expensive failure.
+    record.context = {
+        **record.context,
+        **({"response_id": usage.response_id} if usage.response_id else {}),
+        **({"max_output_tokens": usage.max_tokens} if usage.max_tokens else {}),
+        **({"reasoning_tokens": usage.reasoning_tokens} if usage.reasoning_tokens else {}),
+    }
+
+
 __all__ = [
     "AIConfigurationError", "AIError", "AIProviderError", "AIRefusalError", "AIResponseError",
-    "DocumentUnsupported", "Generation", "ModelTier", "TierConfig", "UsageRecord",
+    "DocumentUnsupported", "Generation", "ModelTier", "ProviderUsage", "TierConfig", "UsageRecord",
     "add_usage_listener", "clear_usage_listeners", "generate", "generate_document",
     "only_usage_listener",
     "get_document_provider", "register_provider", "resolve_tier",

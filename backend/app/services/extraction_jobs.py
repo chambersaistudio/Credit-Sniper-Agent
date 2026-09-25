@@ -36,6 +36,7 @@ from app.database import async_session_maker
 from app.models.credit_report import CreditReport
 from app.models.user import User
 from app.services.document_extraction import ExtractionStatus
+from app.services.document_extraction.status import OPERATIONAL_REASONS
 from app.services.document_extraction.pipeline import (
     DocumentExtractionResult,
     reconcile,
@@ -153,9 +154,9 @@ async def process_report(report_id, *, session_factory=None) -> str:
         # ── Pass 1: extract. Skipped entirely if already checkpointed. ──
         if not checkpoint.get("extraction"):
             await _set_stage(db, report, Stage.EXTRACTING)
-            extraction, model, error = await run_extractor(document, context=context)
+            extraction, model, failure = await run_extractor(document, context=context)
             if extraction is None:
-                return await _provider_unavailable(db, report, parsed, error)
+                return await _pass_failed(db, report, parsed, failure)
             checkpoint = {**checkpoint,
                           "extraction": extraction.model_dump(mode="json"),
                           "extractor_model": model}
@@ -167,12 +168,15 @@ async def process_report(report_id, *, session_factory=None) -> str:
         audit = None
         if settings.document_audit_enabled and not checkpoint.get("audit_done"):
             await _set_stage(db, report, Stage.AUDITING)
-            audit, model, error = await run_auditor(document, extraction, context=context)
+            audit, model, failure = await run_auditor(document, extraction, context=context)
             checkpoint = {**checkpoint,
                           "audit": audit.model_dump(mode="json") if audit else None,
                           "audit_done": True,
                           "auditor_model": model,
-                          "audit_error": error}
+                          # Operator-only, and kept structured so an audit that
+                          # blew the token budget is not filed as an outage.
+                          "audit_error": failure.detail if failure else None,
+                          "audit_failure": failure.to_dict() if failure else None}
             report.extraction_checkpoint = checkpoint
         elif checkpoint.get("audit"):
             audit = AuditReport.model_validate(checkpoint["audit"])
@@ -214,17 +218,32 @@ async def _finish(db: AsyncSession, report: CreditReport, outcome, parsed: dict[
     return outcome.status.value
 
 
-async def _provider_unavailable(
-    db: AsyncSession, report: CreditReport, parsed: dict[str, Any], error: str | None
+async def _pass_failed(
+    db: AsyncSession, report: CreditReport, parsed: dict[str, Any], failure
 ) -> str:
-    """The provider failed us before anything was read. The stored document is
-    untouched and the job can be retried later without re-running any pass
-    that already succeeded."""
-    report.last_processing_error_class = (error or "AIError").split(":", 1)[0]
+    """An expensive pass failed before anything could be read.
+
+    The stored document is untouched. What happens next depends on WHICH
+    failure it was: an outage can simply be re-queued, while a response that
+    blew the token budget must not be, because re-running it spends the same
+    money for the same outcome. That distinction is carried by the status, so
+    it reaches the retry endpoint and the UI rather than living in a log line.
+    """
+    status = failure.status if failure else ExtractionStatus.PROVIDER_UNAVAILABLE
+    report.last_processing_error_class = failure.error_class if failure else "AIError"
+    if failure and failure.billed:
+        # The most expensive failures must be the most visible ones.
+        logger.error(
+            "Report %s: %s on the %s pass BILLED %d in / %d out tokens (budget %s) — "
+            "re-running it would buy the same failure again",
+            report.id, failure.error_class, failure.pass_name,
+            failure.input_tokens, failure.output_tokens, failure.max_tokens,
+        )
     result = DocumentExtractionResult(
-        None, None, ExtractionStatus.PROVIDER_UNAVAILABLE,
-        ["AI extraction was unavailable, so the document was never analyzed."],
-        provider_error=error,
+        None, None, status,
+        [OPERATIONAL_REASONS[status]],
+        provider_error=f"{failure.error_class}: {failure.detail}" if failure else None,
+        failure=failure,
     )
     return await _finish(db, report, outcome_from_document(result, parsed), parsed)
 

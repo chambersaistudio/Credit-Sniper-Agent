@@ -49,6 +49,7 @@ class RunResult:
     scorecard: Scorecard
     costs: list[PassCost] = field(default_factory=list)
     provider_error: str | None = None
+    failure_status: str | None = None
 
     @property
     def total_cost_usd(self) -> float | None:
@@ -78,6 +79,7 @@ class RunResult:
                 "total_latency_ms": self.total_latency_ms,
             },
             "provider_error": self.provider_error,
+            "failure_status": self.failure_status,
         }
 
 
@@ -123,11 +125,16 @@ async def run_config(document: bytes, truth: GroundTruth, config: BenchmarkConfi
     if extraction is not None:
         costs.append(collector.cost_for("audit_report_document", "audit"))
 
+    failure = extract_error or audit_error
     return RunResult(
         document=truth.name, config=config,
         scorecard=score_extraction(truth, config.name, extraction, audit),
         costs=costs,
-        provider_error=extract_error or audit_error,
+        # Operator text, including the classified failure: a config that blows
+        # the token budget must be distinguishable in the results from one the
+        # provider simply refused to serve.
+        provider_error=(f"{failure.error_class}: {failure.detail}" if failure else None),
+        failure_status=(failure.status.value if failure else None),
     )
 
 

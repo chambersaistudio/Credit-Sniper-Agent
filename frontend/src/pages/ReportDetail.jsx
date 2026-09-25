@@ -24,6 +24,12 @@ const STATUS = {
   failed: ['error', "We couldn't reliably read this PDF", 'Your original is stored safely, but nothing could be extracted from it. A text-based PDF (rather than a scan or photo) usually works.'],
   // Our service failed, not their file. Never suggest re-uploading here.
   provider_unavailable: ['warn', 'Extraction unavailable', 'Your report was stored safely, but AI extraction is temporarily unavailable. No report data was analyzed. Retry extraction once the service is available.'],
+  // The reader ran and we were billed, but its answer was unusable — almost
+  // always a report too large to transcribe in one pass. Never offer a retry
+  // here: it would reproduce the same failure at the same cost.
+  model_response_failed: ['warn', "We couldn't finish reading this report", "Your report was stored safely, but it's larger than our reader currently handles in one pass. Nothing is wrong with your document, and retrying won't help yet. We've been alerted and are working on it."],
+  model_refused: ['warn', 'Reading stopped early', "Your report was stored safely, but our reader stopped before finishing it. Nothing is wrong with your document. We've been alerted and are looking into it."],
+  configuration_error: ['warn', 'Reading unavailable', "Your report was stored safely, but report reading isn't available on this deployment right now. Nothing is wrong with your document. We've been alerted."],
 }
 
 export default function ReportDetail() {

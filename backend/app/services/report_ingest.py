@@ -25,6 +25,7 @@ from app.services.account_matcher import link_accounts
 from app.services.ai import AIError
 from app.services.ai_extraction import extract_with_ai
 from app.services.document_extraction import ExtractionStatus
+from app.services.document_extraction.status import OPERATIONAL_MESSAGES
 from app.services.document_extraction.mapping import account_row, inquiry_rows, public_records
 from app.services.document_extraction.pipeline import DocumentExtractionResult
 from app.services.extraction_quality import assess_accounts, inquiry_is_suspicious
@@ -38,10 +39,7 @@ SUPPORTED_BUREAUS = {"equifax", "experian", "transunion"}
 # Said to the consumer when the AI provider — not their document — failed.
 # Deliberately free of provider internals: quota, rate limits and 5xx are our
 # operational problem, and the detail belongs in logs and telemetry.
-PROVIDER_UNAVAILABLE_MESSAGE = (
-    "Your report was stored safely, but AI extraction is temporarily unavailable. "
-    "No report data was analyzed. Retry extraction once the service is available."
-)
+PROVIDER_UNAVAILABLE_MESSAGE = OPERATIONAL_MESSAGES[ExtractionStatus.PROVIDER_UNAVAILABLE]
 UNKNOWN_BUREAU_MESSAGE = (
     "We couldn't tell which bureau this report is from. Re-upload it and choose the bureau."
 )
@@ -124,13 +122,13 @@ def outcome_from_document(result: DocumentExtractionResult, parsed: dict[str, An
     Takes an already-run result so the caller controls when each expensive
     pass happens — a failed audit must never cause a second extraction."""
     if result.extraction is None:
-        # Distinguish "the provider was unavailable" from "we read the
-        # document and couldn't make sense of it". Only the latter says
-        # anything about the consumer's PDF.
-        provider_failure = result.status is ExtractionStatus.PROVIDER_UNAVAILABLE
+        # Distinguish an operational failure — the provider was down, or the
+        # model's answer was unusable — from "we read the document and
+        # couldn't make sense of it". Only the latter says anything about the
+        # consumer's PDF, and only it may be reported as such.
         return IngestOutcome(
             accounts=[], inquiries=[], quality=assess_accounts([]), status=result.status,
-            method="provider_unavailable" if provider_failure else "document_failed",
+            method=result.status.value if result.status.is_operational else "document_failed",
             reasons=result.reasons, audit=result.audit_to_dict(),
             bureau=parsed.get("bureau", "unknown"),
         )
@@ -295,10 +293,13 @@ def warnings_for(outcome: IngestOutcome, account_count: int) -> list[str]:
                 f"{outcome.ungrounded_values_dropped} extracted value(s) didn't appear in the document "
                 "and were left blank."
             )
-    if outcome.status is ExtractionStatus.PROVIDER_UNAVAILABLE:
+    if outcome.status.is_operational:
         # The document was never analyzed, so nothing may be said about what
-        # it contains — least of all that it holds no accounts.
-        warnings.append(PROVIDER_UNAVAILABLE_MESSAGE)
+        # it contains — least of all that it holds no accounts. Each
+        # operational failure gets its own copy: telling a consumer to "retry
+        # once the service is available" after a billed truncation would be
+        # both untrue and expensive.
+        warnings.append(OPERATIONAL_MESSAGES[outcome.status])
     elif outcome.status is ExtractionStatus.FAILED or account_count == 0:
         warnings.append("We couldn't reliably read this PDF, so no accounts were extracted from it.")
     elif outcome.status is ExtractionStatus.NEEDS_AUDIT:

@@ -234,8 +234,13 @@ async def retry_extraction(
     if is_in_flight(report):
         # Already queued or running. Clicking again costs nothing.
         return _accepted(report, duplicate=True)
-    if not ExtractionStatus(report.extraction_status).is_retryable:
-        raise HTTPException(status_code=409, detail="This report doesn't need re-extraction.")
+    status = ExtractionStatus(report.extraction_status)
+    if not status.is_retryable:
+        # Deliberately refused rather than quietly re-queued. A billed failure
+        # (the model answered, but unusably) reproduces exactly on a retry, so
+        # offering one would spend real money to buy the same outcome.
+        raise HTTPException(status_code=409, detail=_RETRY_REFUSALS.get(
+            status, "This report doesn't need re-extraction."))
     if report.accounts:
         raise HTTPException(
             status_code=409,
@@ -276,6 +281,21 @@ async def download_report_file(
         headers={"Content-Disposition": f'inline; filename="report-{report_id[:8]}.pdf"'},
     )
 
+
+# Why re-running extraction is refused. Each says what it says because the
+# failures differ in cost, not just in cause.
+_RETRY_REFUSALS = {
+    ExtractionStatus.MODEL_RESPONSE_FAILED: (
+        "Re-reading this report won't help on its own — it's larger than our reader currently "
+        "handles in one pass. We've been alerted; nothing is wrong with your document."
+    ),
+    ExtractionStatus.MODEL_REFUSED: (
+        "Re-reading this report won't help on its own. We've been alerted and are looking into it."
+    ),
+    ExtractionStatus.CONFIGURATION_ERROR: (
+        "Report reading isn't available on this deployment right now. We've been alerted."
+    ),
+}
 
 # Consumer-facing wording for each background stage. Never names a provider
 # or a vendor error: those are ours to deal with.

@@ -83,9 +83,11 @@ export default function UploadReport() {
     // Never present a clean "added" result for a report we couldn't read and
     // verify — the state of the extraction leads.
     const verified = result.extraction_status === 'verified'
-    // Whether the document was analyzed at all. When the provider was
-    // unavailable we know nothing about its contents.
-    const analyzed = result.extraction_status !== 'provider_unavailable'
+    // Whether the document was analyzed at all. After any operational
+    // failure we know nothing about its contents, so "0 accounts" would be a
+    // claim about the consumer's report that we have no basis for.
+    const OPERATIONAL = ['provider_unavailable', 'model_response_failed', 'model_refused', 'configuration_error']
+    const analyzed = !OPERATIONAL.includes(result.extraction_status)
     return (
       <div className="content">
         <PageHeader
@@ -114,15 +116,16 @@ export default function UploadReport() {
               differences. Dispute analysis is paused until those differences are reconciled.
             </div>
           )}
-          {/* Our service was down, not their document — and nothing was read,
-              so we can't say the report contains no accounts. */}
-          {result.extraction_status === 'provider_unavailable' && (
+          {/* Our failure, not their document — and nothing was read, so we
+              can't say the report contains no accounts. The specific wording
+              comes from the backend, which knows whether a retry would help. */}
+          {!analyzed && (result.warnings || []).length === 0 && (
             <div className="alert alert-warn">
-              Your report was stored safely, but AI extraction is temporarily unavailable. No report data
-              was analyzed. Retry extraction once the service is available.
+              Your report was stored safely, but we weren't able to read it. Nothing is wrong with your
+              document. We've been alerted.
             </div>
           )}
-          {!verified && !['needs_audit', 'provider_unavailable'].includes(result.extraction_status) && (
+          {!verified && analyzed && result.extraction_status !== 'needs_audit' && (
             <div className="alert alert-error">
               Your original PDF is stored safely, but it couldn't be read completely, so dispute analysis
               is on hold for this report.
