@@ -122,6 +122,16 @@ With more than one API instance, the worker runs in each of them and they can
 pick up the same report. Run exactly one instance, or set
 `EXTRACTION_WORKER_ENABLED=false` on all but one.
 
+**Operator commands on Railway.** The image is built from `backend/`, so the
+repository's `scripts/` are not in `/app`. The same commands ship as modules:
+
+    python -m app.operator.index_pass      --report <id> --expect 15
+    python -m app.operator.extract_batch   --report <id> --plan
+    python -m app.operator.batch_benchmark --report <id> --batch b0 --truth-inline '<json>'
+
+They are imported only when run; nothing in the serving path imports
+`app.operator`, so they cannot affect the API.
+
 **Choosing extraction models:** do not change the document tiers by intuition.
 `scripts/benchmark_extraction.py` scores candidate configurations against
 human-confirmed ground truth for real reports and reports quality, latency,

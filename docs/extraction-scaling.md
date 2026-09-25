@@ -100,9 +100,20 @@ leaving ample room for reasoning, without multiplying the call count.
 
 **The document is no longer re-sent whole.** Each batch receives a transient
 PDF containing only the pages the Stage-1 index placed its tradelines on,
-plus one neighbouring page either side as a safety margin. For the validated
-15-tradeline Experian index that is **19 page-sends across four batches
-instead of 124** — 85% less document.
+plus one neighbouring page either side as a safety margin.
+
+Measured on the real banked Experian index (31 pages, 15 tradelines):
+
+| Batch | Indexed pages | Bundle | Padding | Page-sends |
+|---|---|---|---|---|
+| b0 | 3, 4, 5, 6 | 2–7 | 2, 7 | 6 |
+| b1 | 7, 8, 9, 10 | 6–11 | 6, 11 | 6 |
+| b2 | 11, 12, 13, 14 | 10–15 | 10, 15 | 6 |
+| b3 | 15, 16, 17 | 14–18 | 14, 18 | 5 |
+| | | | **total** | **23** |
+
+Against 31 pages × 4 batches = 124 page-sends if each batch re-sent the whole
+report, that is **101 fewer — an 81.5% reduction**.
 
 ### Stage 3 — merge (deterministic, no model)
 
@@ -177,14 +188,36 @@ be accounted for and found again:
 index tier's budget. On Luna that is roughly **$0.01–0.02 per index pass**,
 against **$1.02 per failed Sol attempt** that banked nothing.
 
+## Running these commands
+
+The Railway image is built from `backend/` alone, so the repository's
+`scripts/` directory does not exist in the container. The logic lives in
+`app/operator/`, and `scripts/*.py` are thin wrappers around exactly those
+modules — one implementation, two entry points, identical behaviour.
+
+**Inside the container** (working directory `/app`):
+
+    python -m app.operator.index_pass     --report <id> --expect 15
+    python -m app.operator.extract_batch  --report <id> --batch b0
+    python -m app.operator.batch_benchmark --report <id> --batch b0 --truth-inline '<json>'
+
+**From a checkout:**
+
+    python scripts/index_pass.py      --report <id> --expect 15
+    python scripts/extract_batch.py   --report <id> --batch b0
+    python scripts/benchmark_batch.py --report <id> --batch b0 --truth batch0.json
+
+Nothing in the serving path imports `app.operator`, so shipping these commands
+cannot change production behaviour.
+
 ## Running Stage 2
 
     # see the plan, spend nothing
-    DATABASE_URL=... python scripts/extract_batch.py --report <id> --plan
+    DATABASE_URL=... python -m app.operator.extract_batch --report <id> --plan
 
     # run ONE batch
     DATABASE_URL=... OPENAI_API_KEY=... \
-      python scripts/extract_batch.py --report <id> --batch b0
+      python -m app.operator.extract_batch --report <id> --batch b0
 
 One batch per invocation, deliberately: there is no flag that runs them all,
 so no accident spends four times what was asked for.
@@ -221,13 +254,24 @@ never paired by name, because that would silently swap their contents.
 ## Benchmarking a batch
 
     DATABASE_URL=... OPENAI_API_KEY=... \
-      python scripts/benchmark_batch.py --report <id> --batch b0 \
-        --truth batch0_truth.json
+      python -m app.operator.batch_benchmark --report <id> --batch b0 \
+        --truth-inline '{"accounts": [ ... ]}'
 
 Runs the same batch and the same bundle under A (luna), B (terra) and C (sol),
 all at `detail=high`, and reports field accuracy, payment-history accuracy,
 provenance accuracy against original page numbers, tokens, latency, cost and
-the gate result. It banks nothing and changes no defaults.
+the gate result.
+
+It banks nothing — it reads through `extract_batch`, which touches no
+database, never through `run_report_batch`, which is what banks — and it
+proves that rather than promising it, by comparing the report's banked batches
+before and after and saying so in its output. It changes no production
+defaults, and only the batch named by `--batch` (default `b0`) runs: there is
+no flag that sweeps them all.
+
+Ground truth can be a file (`--truth batch0.json`), stdin (`--truth -`) or a
+literal string (`--truth-inline '<json>'`), the last being the practical one
+inside a container.
 
 ## Sequencing
 
@@ -253,7 +297,7 @@ The failed run billed ~94,300 input + 32,000 output tokens for nothing.
 Two things changed the arithmetic since that was written. The Stage-1 index at
 `detail=low` cost 12,486 input tokens — far less than the estimate, because
 low-detail rendering is dramatically cheaper per page. And batches no longer
-re-send the whole document: 19 page-sends instead of 124.
+re-send the whole document: 23 page-sends instead of 124, an 81.5% reduction.
 
 So the earlier caveat — "batching probably costs more on a successful
 extraction" — no longer obviously holds, and should not be assumed either way
