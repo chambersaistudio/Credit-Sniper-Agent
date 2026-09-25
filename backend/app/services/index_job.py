@@ -37,6 +37,9 @@ class IndexResult:
         self.failure = failure
         self.quality = quality
         self.banked = banked
+        # True when this index came from the checkpoint rather than a model
+        # call — i.e. this invocation spent nothing.
+        self.reused = False
 
     @property
     def ok(self) -> bool:
@@ -47,6 +50,7 @@ class IndexResult:
             "model": self.model,
             "ok": self.ok,
             "banked": self.banked,
+            "reused": self.reused,
             "quality": self.quality.to_dict(),
             "failure": self.failure.to_dict() if self.failure else None,
             "tradelines": [t.model_dump() for t in (self.index.tradelines if self.index else [])],
@@ -58,6 +62,28 @@ class IndexResult:
             "declared_count": self.index.tradeline_count if self.index else None,
             "total_pages": self.index.total_pages if self.index else None,
         }
+
+
+def _banked_index(report: CreditReport):
+    """A previously banked PASSING index for this report, or None.
+
+    Only a passing one counts. A failed index is never banked in the first
+    place, but an older row could carry one, and reusing it would propagate a
+    bad page map into every batch."""
+    checkpoint = report.extraction_checkpoint or {}
+    stored = checkpoint.get("index")
+    if not stored:
+        return None
+    try:
+        index = ReportIndex.model_validate(stored)
+    except Exception:  # a checkpoint from an older schema is not reusable
+        logger.warning("Report %s: banked index does not match the current schema; re-indexing",
+                       report.id)
+        return None
+    quality = assess_index(index)
+    if not quality.ok:
+        return None
+    return index, checkpoint.get("index_model"), quality
 
 
 async def index_document(
@@ -72,13 +98,18 @@ async def index_document(
 
 async def index_report(
     report_id, *, session_factory=None, expected_tradelines: int | None = None,
-    bank_failed: bool = False,
+    bank_failed: bool = False, force: bool = False,
 ) -> IndexResult:
     """Index the original PDF already stored for a report, and checkpoint it.
 
-    Only a passing index is banked by default: a checkpoint is a promise that
-    the work behind it need not be repeated, and an index that failed its
-    quality gate is not work anyone should build on."""
+    Idempotent: a report that already has a passing banked index is returned
+    as-is rather than re-indexed. Running this command twice by hand must not
+    buy the same index twice — a checkpoint is a promise that the work behind
+    it need not be repeated, and that promise has to be honoured by the code
+    that would otherwise repeat it. `force` re-indexes deliberately.
+
+    Only a passing index is banked: an index that failed its quality gate is
+    not work anyone should build on."""
     factory = session_factory or async_session_maker
     async with factory() as db:
         report = await db.get(CreditReport, report_id)
@@ -86,6 +117,15 @@ async def index_report(
             raise LookupError(f"no report {report_id}")
         if not report.storage_key:
             raise LookupError(f"report {report_id} has no stored original")
+
+        existing = _banked_index(report)
+        if existing is not None and not force:
+            index, model, quality = existing
+            logger.info("Report %s: reusing banked index (%d tradelines, model %s)",
+                        report_id, quality.listed, model)
+            result = IndexResult(index, model, None, quality, banked=True)
+            result.reused = True
+            return result
 
         document = await get_storage().get(report.storage_key)
         result = await index_document(

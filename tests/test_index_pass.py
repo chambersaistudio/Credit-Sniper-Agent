@@ -386,3 +386,47 @@ class TestIndexCheckpoint:
         assert row.estimated_cost_usd == pytest.approx(0.00963, abs=1e-5)
         # Two orders of magnitude under the $1.0173 a failed Sol attempt burned.
         assert row.estimated_cost_usd < 0.05
+
+
+# ── Stage 1 idempotency ─────────────────────────────────────────────────
+
+@requires_db
+class TestIndexIdempotency:
+    async def test_indexing_twice_does_not_buy_the_index_twice(self, db_ready, index_ai):
+        """Invoking Stage 1 by hand a second time must reuse what is banked."""
+        from app.services.index_job import index_report
+
+        provider = index_ai()
+        report_id = await TestIndexCheckpoint._report(db_ready)
+
+        first = await index_report(report_id, expected_tradelines=15)
+        assert first.ok and first.banked and not first.reused
+        assert len(provider.calls) == 1
+
+        second = await index_report(report_id, expected_tradelines=15)
+        assert second.ok and second.reused
+        assert len(provider.calls) == 1, "the same index was purchased twice"
+        assert second.quality.listed == 15
+
+        forced = await index_report(report_id, expected_tradelines=15, force=True)
+        assert not forced.reused
+        assert len(provider.calls) == 2
+
+    async def test_a_failed_index_is_not_treated_as_reusable(self, db_ready, index_ai):
+        """Nothing banks a failing index, but an older row could carry one —
+        reusing it would propagate a bad page map into every batch."""
+        from app.database import async_session_maker
+        from app.models.credit_report import CreditReport
+        from app.services.index_job import index_report
+
+        provider = index_ai()
+        report_id = await TestIndexCheckpoint._report(db_ready)
+        async with async_session_maker() as db:
+            row = await db.get(CreditReport, report_id)
+            short = golden_index(tradelines=[_entry(*r) for r in GOLDEN_INDEX[:9]])
+            row.extraction_checkpoint = {"index": short.model_dump(mode="json")}
+            await db.commit()
+
+        result = await index_report(report_id, expected_tradelines=15)
+        assert not result.reused, "a failing index must not be reused"
+        assert len(provider.calls) == 1

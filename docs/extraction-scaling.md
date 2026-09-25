@@ -1,7 +1,7 @@
 # Scaling document extraction beyond one pass
 
-**Status: Stage 1 implemented and awaiting validation on the real PDF.
-Stages 2 and 3 remain a proposal.** Written after the Experian failure
+**Status: Stage 1 validated in production. Stage 2 implemented and awaiting
+its first real batch. Stage 3 (merge) remains a proposal.** Written after the Experian failure
 diagnosed in `scripts/diagnose_report.py`.
 
 The failure is confirmed from production: two Sol attempts, both
@@ -69,7 +69,10 @@ The index is also the count the auditor is checked against, which strengthens
 the existing "audit counted N, extraction has M" gate: today both numbers come
 from a model that saw everything at once.
 
-### Stage 2 — batches (the expensive work, parallelisable)
+### Stage 2 — batches (the expensive work) — IMPLEMENTED
+
+Run one batch with `scripts/extract_batch.py`; see "Running Stage 2" below.
+
 
 For each batch of **4 tradelines** (~8,500 output tokens, 26% of budget —
 roughly 3× headroom for reasoning), send the same original PDF plus the index
@@ -92,12 +95,14 @@ extraction_checkpoint = {
 
 Batch 2 failing re-runs batch 2. That is the rule, satisfied directly.
 
-Why 4 and not 1: input tokens dominate. The PDF is re-sent with every batch —
-~94,000 input tokens in the failed run — so the batch size trades output-budget
-headroom against re-sending the document. Batches of 4 keep the call count
-low while leaving ample room for reasoning. **The real number should come from
-the benchmark, not from this estimate.** Prompt caching on the document prefix
-would change the calculus substantially and is worth measuring first.
+Why 4 and not 1: it keeps detailed output at roughly a quarter of the budget,
+leaving ample room for reasoning, without multiplying the call count.
+
+**The document is no longer re-sent whole.** Each batch receives a transient
+PDF containing only the pages the Stage-1 index placed its tradelines on,
+plus one neighbouring page either side as a safety margin. For the validated
+15-tradeline Experian index that is **19 page-sends across four batches
+instead of 124** — 85% less document.
 
 ### Stage 3 — merge (deterministic, no model)
 
@@ -111,13 +116,11 @@ large report, since it receives the extraction as prompt input.
 
 ### Alternatives considered
 
-- **Deterministic page segmentation first.** Split the PDF by page ranges
-  locally, then extract per chunk. Cheaper (each call carries fewer input
-  tokens), but it reintroduces exactly what the AI-native rewrite removed: a
-  local heuristic deciding what the model is allowed to see. A tradeline
-  spanning a page break, or an Experian two-column layout, would be silently
-  cut. Viable *later* as an input-cost optimisation, using the stage-1 index's
-  page numbers — which the model produced — rather than a regex.
+- **Deterministic page segmentation first.** Splitting the PDF by locally
+  guessed page ranges would reintroduce exactly what the AI-native rewrite
+  removed: a heuristic deciding what the model may see. This is why page
+  selection is driven by the Stage-1 index — page numbers a model produced
+  from the whole document — and never by a regex or a text search.
 - **Smaller schema.** Drop `field_evidence`, or store payment history as a
   compact string. Halves the output, but provenance is the thing that makes an
   extraction auditable, and the compact form would have to be re-parsed
@@ -174,26 +177,89 @@ be accounted for and found again:
 index tier's budget. On Luna that is roughly **$0.01–0.02 per index pass**,
 against **$1.02 per failed Sol attempt** that banked nothing.
 
+## Running Stage 2
+
+    # see the plan, spend nothing
+    DATABASE_URL=... python scripts/extract_batch.py --report <id> --plan
+
+    # run ONE batch
+    DATABASE_URL=... OPENAI_API_KEY=... \
+      python scripts/extract_batch.py --report <id> --batch b0
+
+One batch per invocation, deliberately: there is no flag that runs them all,
+so no accident spends four times what was asked for.
+
+**Page bundling.** The bundle is built in memory from the banked index's
+`source_pages`, handed to one model call, and dropped. The original in R2 is
+read, never written. A tradeline the index placed on two pages contributes
+both.
+
+**Original page numbers survive.** The model sees a renumbered short document
+and reports pages 1..N; those are translated back deterministically through
+the bundle's page map, in all three places a page number appears — the
+tradeline's `source_pages`, every `field_evidence` entry, and every month of
+`payment_history`. A page reference the bundle cannot place is dropped and
+reported rather than approximated: a wrong page is worse than none, being
+indistinguishable from real provenance later. The manifest given to the model
+deliberately contains no original page numbers, so it cannot be tempted to
+report those instead of what it sees.
+
+**Independent checkpoints.** A passing batch banks at
+`extraction_checkpoint["batches"][batch_id]`. A batch that fails costs only
+itself — rehearsed: with b0 banked, a provider failure on b1 left b0 and the
+Stage-1 index untouched. A banked batch is reused rather than re-read unless
+`--force`.
+
+**The batch gate** requires the batch to answer exactly what it was asked:
+every named tradeline returned, nothing extra (the bundle's pages hold other
+accounts, and reporting one would become a duplicate at merge time), and every
+page reference inside the supplied pages. Identity is matched in tiers —
+exact, then name + masked digits, then name + original creditor, then name
+alone *only when unique in the batch*. Two collections from one agency are
+never paired by name, because that would silently swap their contents.
+
+## Benchmarking a batch
+
+    DATABASE_URL=... OPENAI_API_KEY=... \
+      python scripts/benchmark_batch.py --report <id> --batch b0 \
+        --truth batch0_truth.json
+
+Runs the same batch and the same bundle under A (luna), B (terra) and C (sol),
+all at `detail=high`, and reports field accuracy, payment-history accuracy,
+provenance accuracy against original page numbers, tokens, latency, cost and
+the gate result. It banks nothing and changes no defaults.
+
 ## Sequencing
 
 1. **Land the failure taxonomy** (done) so a truncation is never again
    mistaken for an outage or silently re-bought.
 2. **Confirm the diagnosis** (done — production shows two `AIResponseError`
    truncations at ~111k characters).
-3. **Validate the index pass** on the real Experian PDF. Success is 15
-   distinct tradelines with correct identities and page locations.
-4. **Build stages 2–3** behind a setting, defaulting off — only after step 3.
-5. **Benchmark** batched-Sol against single-pass Sol on the reports that
-   currently succeed, to confirm batching does not cost quality. Only then
-   consider the A/B/C model comparison — cheaper models are a separate
-   question from a working extraction shape.
+3. **Validate the index pass** (done — Luna indexed all 15 tradelines,
+   distinct, with page refs, in 10.5s for $0.0035; 12,486 input tokens at
+   `detail=low`, well under the estimate).
+4. **Build Stage 2** (done). Not wired into the upload worker: the operator
+   runs one batch at a time.
+5. **Benchmark the first batch** across luna/terra/sol at `detail=high`
+   against confirmed ground truth, then choose the production model.
+6. **Stage 3 (merge)** once a model is chosen: concatenate banked batches in
+   index order, attach Stage 1's report-level fields, re-run duplicate
+   detection, then the existing auditor over the merged extraction.
 
 ## What this changes about cost
 
 The failed run billed ~94,300 input + 32,000 output tokens for nothing.
-Batching re-sends the document per batch, so input tokens rise; output tokens
-stay roughly the same in total but become *recoverable*. The honest summary:
-batching probably costs more on a successful extraction and enormously less on
-a failing one, because a failure stops discarding everything that preceded it.
-Prompt caching is the lever that would make it cheaper on both, and should be
-measured as part of step 5.
+
+Two things changed the arithmetic since that was written. The Stage-1 index at
+`detail=low` cost 12,486 input tokens — far less than the estimate, because
+low-detail rendering is dramatically cheaper per page. And batches no longer
+re-send the whole document: 19 page-sends instead of 124.
+
+So the earlier caveat — "batching probably costs more on a successful
+extraction" — no longer obviously holds, and should not be assumed either way
+until the batch benchmark measures it. What is certain is the failure case: a
+batch that fails costs one batch, not the whole report, and every batch that
+already passed stays banked.
+
+Prompt caching on the bundle prefix is the remaining lever and is worth
+measuring once a model is chosen.

@@ -18,7 +18,7 @@ import pytest
 
 from app.services.ai import AIProviderError
 from app.services.document_extraction.schema import AuditReport, CreditReportExtraction
-from tests.conftest import drain_extraction_queue, requires_db
+from tests.conftest import assert_no_provider_internals, drain_extraction_queue, requires_db
 from tests.test_document_ingestion_flow import (  # reuse the golden Experian fixtures
     SOURCE_PDF_TEXT, FakeDocumentProvider, _pdf, client, document_ai, golden_extraction,
     verifying_audit,
@@ -282,10 +282,7 @@ async def test_processing_responses_carry_no_provider_internals(client, document
     detail = await client.get(f"/api/reports/{report_id}")
     listing = await client.get("/api/reports/")
     for response in (status, detail, listing):
-        body = response.text.lower()
-        for leak in ("429", "quota", "insufficient_quota", "credit_balance_exhausted",
-                     "openai", "aiprovidererror", "last_processing_error_class"):
-            assert leak not in body, f"{leak} leaked into {response.request.url}"
+        assert_no_provider_internals(response.text)
 
     # Operators still get it, on the row.
     row = await _row(report_id)

@@ -130,6 +130,9 @@ async def main() -> int:
                         help="permit a Sol model for indexing (normally refused)")
     parser.add_argument("--bank-failed", action="store_true",
                         help="checkpoint the index even if it fails the gate (inspection only)")
+    parser.add_argument("--force", action="store_true",
+                        help="re-index even though a passing index is already banked "
+                             "(this spends money; by default a banked index is reused)")
     parser.add_argument("--json", dest="as_json", help="also write the full result here")
     args = parser.parse_args()
 
@@ -170,7 +173,11 @@ async def main() -> int:
             from app.services.index_job import index_report
 
             print(f"  source: stored original for report {args.report}")
-            result = await index_report(args.report, expected_tradelines=args.expect)
+            result = await index_report(args.report, expected_tradelines=args.expect,
+                                        force=args.force)
+            if result.reused:
+                print("  REUSED the banked index — no model call, nothing spent.")
+                print("  Pass --force to re-index deliberately.")
 
     record = next((r for r in collector.records if r.task == "index_report_document"), None)
 
@@ -188,7 +195,8 @@ async def main() -> int:
     _print_telemetry(record, result.quality.listed)
     _print_gate(result.quality, args.expect)
     if args.report:
-        print(f"\n  index checkpointed on the report: {result.banked}")
+        print(f"\n  index checkpointed on the report: {result.banked}"
+              f"{' (reused, not re-purchased)' if result.reused else ''}")
 
     if args.as_json:
         Path(args.as_json).write_text(json.dumps(result.to_dict(), indent=2, default=str))

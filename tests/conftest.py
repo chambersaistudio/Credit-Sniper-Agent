@@ -93,6 +93,32 @@ async def upload_and_process(client, pdf_bytes, *, bureau="auto_detect", headers
     return await client.get(f"/api/reports/{report_id}", **({"headers": headers} if headers else {}))
 
 
+# Anything that would identify the AI vendor, its status codes or its token
+# accounting to a consumer. Checked against responses that must stay generic.
+PROVIDER_INTERNALS = (
+    "openai", "anthropic", "gpt-", "claude-", "quota", "insufficient_quota",
+    "credit_balance_exhausted", "airesponseerror", "aiprovidererror",
+    "airefusalerror", "aiconfigurationerror", "max_output_tokens",
+    "reasoning_tokens", "response_id", "last_processing_error_class",
+    "api error", "status code", "resp_",
+)
+
+
+def assert_no_provider_internals(text: str, *, extra: tuple[str, ...] = ()) -> None:
+    """Fail if a consumer-facing payload names the provider or its internals.
+
+    UUIDs and timestamps are stripped first: a report id like
+    a794429a-... contains "429", and a bare-substring check against raw digits
+    would report a leak that is not there."""
+    import re
+
+    scrubbed = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<id>",
+                      text, flags=re.I)
+    scrubbed = re.sub(r"\d{4}-\d{2}-\d{2}t[\d:.+-]+", "<ts>", scrubbed, flags=re.I).lower()
+    for leak in PROVIDER_INTERNALS + extra:
+        assert leak not in scrubbed, f"{leak!r} leaked into a consumer-facing response"
+
+
 requires_db = pytest.mark.skipif(not TEST_DATABASE_URL, reason="set TEST_DATABASE_URL to run integration tests")
 
 

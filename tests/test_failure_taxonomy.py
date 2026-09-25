@@ -21,7 +21,7 @@ from app.services.ai import ProviderUsage
 from app.services.document_extraction.status import (
     OPERATIONAL_MESSAGES, OPERATIONAL_REASONS, ExtractionStatus,
 )
-from tests.conftest import drain_extraction_queue, requires_db
+from tests.conftest import assert_no_provider_internals, drain_extraction_queue, requires_db
 from tests.test_document_ingestion_flow import (
     SOURCE_PDF_TEXT, FakeDocumentProvider, _pdf, client, document_ai, golden_extraction,
     verifying_audit,
@@ -306,8 +306,5 @@ async def test_no_failure_class_leaks_provider_internals(client, document_ai, er
     report_id = await _upload(client)
 
     for path in (f"/api/reports/{report_id}/status", f"/api/reports/{report_id}", "/api/reports/"):
-        body = (await client.get(path)).text.lower()
-        for leak in ("openai", "429", "quota", "max_output_tokens", "resp_abc123",
-                     "airesponseerror", "aiproviderror", "reasoning", "94317", "32000",
-                     "authentication"):
-            assert leak not in body, f"{leak} leaked into {path}"
+        body = (await client.get(path)).text
+        assert_no_provider_internals(body, extra=("resp_abc123", "authentication", "94,317"))

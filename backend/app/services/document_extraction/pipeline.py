@@ -21,6 +21,7 @@ from typing import Any
 
 from app.config import settings
 from app.services.ai import AIError, ModelTier, generate_document
+from app.services.document_extraction.batch_schema import TradelineBatch
 from app.services.document_extraction.index_schema import ReportIndex
 from app.services.document_extraction.schema import AuditReport, CreditReportExtraction
 from app.services.document_extraction.status import OPERATIONAL_REASONS, ExtractionStatus
@@ -369,6 +370,75 @@ class PassFailure:
             "reasoning_tokens": self.reasoning_tokens, "max_output_tokens": self.max_tokens,
             "latency_ms": round(self.latency_ms, 1), "response_id": self.response_id,
         }
+
+
+BATCH_SYSTEM = """You read a few tradelines from a consumer credit report, in full detail.
+
+You are looking at SOME PAGES of a credit report, not the whole report. They have been renumbered: \
+the first page you can see is page 1, the next is page 2, and so on. Record page numbers exactly as \
+they appear in THIS document. Do not try to work out where these pages sat in the original report.
+
+You will be told which tradelines to read. Read ONLY those, and read every one of them.
+
+Rules:
+- Transcribe only what the document shows. If a field is not printed for an account, return null. \
+Never infer, calculate, or carry a value over from another account.
+- The account's own name is the company REPORTING it — the furnisher, or the collection agency for a \
+collection. If the report also names an original creditor, that goes in `original_creditor`, never in \
+`creditor_name`.
+- Copy money and dates exactly as printed (for example "$1,204" and "Feb 15, 2026"). Do not convert them.
+- Transcribe the month-by-month payment grid cell by cell, keeping each code exactly as printed.
+- Keep these distinct concepts in their own fields, never merged:
+  * `balance_updated` is the "Balance updated" date. `date_last_reported` is only for a field the report \
+actually labels "Last reported"/"Date reported". If only "Balance updated" is printed, leave \
+`date_last_reported` null.
+  * `payment_status` is the account's own payment standing. A page or section label such as "Potentially \
+negative" or "Exceptional payment history" is a `report_classification`, not a payment status or account status.
+  * `open_closed` is whether the account is open or closed. A payment phrase such as "Pays account as \
+agreed" describes how it is being PAID and says nothing about whether it is open — never use one for the other.
+- A tradeline you were asked for that is not on these pages goes in `missing_tradelines`. Do not invent \
+an entry for it, and do not substitute a different account.
+- Do not report any tradeline you were NOT asked for, even if it appears on these pages.
+- For each account record the pages you read it from, a short excerpt proving its identity, and short \
+excerpts for the important fields."""
+
+
+def _batch_prompt(manifest: str, page_count: int) -> str:
+    return (
+        f"The attached document has {page_count} page(s), numbered 1 to {page_count}.\n\n"
+        f"Read these {manifest.count(chr(10)) + 1} tradelines from it, in full detail:\n\n"
+        f"{manifest}\n\n"
+        "Return one entry per tradeline above, in that order. Record page numbers as they appear in "
+        "the attached document, starting at 1. Return null for anything the document does not state."
+    )
+
+
+async def run_batch_extractor(
+    bundle_pdf: bytes, manifest: str, page_count: int, *,
+    filename: str = "credit-report-pages.pdf", context: dict[str, Any] | None = None,
+) -> tuple["TradelineBatch | None", str | None, "PassFailure | None"]:
+    """Stage 2: read one batch of tradelines from a bundle of their pages.
+
+    Returns (batch, model, failure). Page numbers in the result are relative to
+    the bundle; the caller translates them back to original pages."""
+    try:
+        generation = await generate_document(
+            ModelTier.DOCUMENT_EXTRACTION,
+            system=BATCH_SYSTEM,
+            prompt=_batch_prompt(manifest, page_count),
+            document=bundle_pdf,
+            filename=filename,
+            output_type=TradelineBatch,
+            task="extract_tradeline_batch",
+            context=context or {},
+            detail=settings.document_extraction_detail,
+        )
+    except AIError as e:
+        failure = PassFailure.from_error("batch", e)
+        logger.warning("Batch extraction failed (%s -> %s): %s%s",
+                       type(e).__name__, failure.status.value, e, failure.cost_note)
+        return None, None, failure
+    return generation.output, generation.model, None
 
 
 async def run_indexer(
