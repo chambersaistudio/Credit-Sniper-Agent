@@ -1,7 +1,14 @@
 # Scaling document extraction beyond one pass
 
-**Status: proposal. Nothing here is implemented.** Written after the Experian
-failure diagnosed in `scripts/diagnose_report.py`.
+**Status: Stage 1 implemented and awaiting validation on the real PDF.
+Stages 2 and 3 remain a proposal.** Written after the Experian failure
+diagnosed in `scripts/diagnose_report.py`.
+
+The failure is confirmed from production: two Sol attempts, both
+`AIResponseError` — `Invalid JSON: EOF while parsing a string` at columns
+112,636 and 110,739. The model produced ~111,000 characters of JSON and was
+cut off mid-string. Nothing was banked; no audit pass ever ran. At ~$1 per
+attempt for nothing.
 
 ## The constraint
 
@@ -44,7 +51,10 @@ it needs to be "one batch of tradelines".
 
 Three stages, each independently checkpointed.
 
-### Stage 1 — index (cheap, one call)
+### Stage 1 — index (cheap, one call) — IMPLEMENTED
+
+Run it with `scripts/index_pass.py`; see "Validating Stage 1" below.
+
 
 Read the whole PDF and return **only the report-level facts and a tradeline
 index**: bureau, document date, score and type, and for each tradeline its
@@ -116,16 +126,63 @@ large report, since it receives the extraction as prompt input.
 - **Streaming with incremental parse.** Does not help: the cap applies to the
   generated tokens regardless of how they are delivered.
 
+## Validating Stage 1
+
+The index pass is a standalone job. It is deliberately NOT wired into the
+upload worker: the full-report extraction it replaces still fails, so running
+both would pay Sol to fail after the index had already succeeded.
+
+    # against the stored original for the failed report
+    DATABASE_URL=... OPENAI_API_KEY=... \
+      python scripts/index_pass.py --report <report_id> --expect 15
+
+One model call, `gpt-5.6-luna` at `detail=low`. It prints the tradelines it
+found with their page locations — check those against the document by eye —
+plus model, input/output/reasoning tokens, latency and estimated cost. Exit 0
+if the index passes its quality gate, 1 if not.
+
+A passing index is checkpointed at `extraction_checkpoint["index"]`, beside
+(never replacing) the extraction checkpoint. A failing one is not banked: a
+checkpoint promises the work behind it need not be repeated, and an index that
+cannot account for every tradeline is not work to build on.
+
+If Luna fails the gate, escalate the **index only**:
+
+    python scripts/index_pass.py --report <id> --expect 15 --model gpt-5.6-terra
+
+The script refuses a Sol model unless explicitly forced. Sol is the escalation
+target for detailed extraction, not for indexing.
+
+### What the gate checks
+
+Beyond the confirmed count, an index is only trusted when every tradeline can
+be accounted for and found again:
+
+- every entry has a creditor name and at least one source page
+- no entry is listed twice — where identity is (furnisher, last four digits,
+  original creditor), so Navy Federal's two accounts and Jefferson Capital's
+  two collections stay distinct rather than being merged
+- the model's self-declared `tradeline_count` matches the list it returned.
+  A listing that stops short of its own count is the signature of a truncated
+  or abandoned response, and would silently drop accounts from every later
+  batch — which is why the schema asks for the total separately
+- the bureau is identified, and no page is reported unreadable
+
+### Expected cost
+
+~77 output tokens per entry; ~1,160 for a 15-tradeline report, about 7% of the
+index tier's budget. On Luna that is roughly **$0.01–0.02 per index pass**,
+against **$1.02 per failed Sol attempt** that banked nothing.
+
 ## Sequencing
 
 1. **Land the failure taxonomy** (done) so a truncation is never again
    mistaken for an outage or silently re-bought.
-2. **Confirm the diagnosis** on the real failed report with
-   `scripts/diagnose_report.py`, and against the provider's usage dashboard.
-3. **Measure the index pass alone** on the real Experian PDF — one cheap call.
-   If it returns 15 tradelines with page numbers, the design is sound and the
-   rest follows.
-4. **Build stages 1–3** behind a setting, defaulting off.
+2. **Confirm the diagnosis** (done — production shows two `AIResponseError`
+   truncations at ~111k characters).
+3. **Validate the index pass** on the real Experian PDF. Success is 15
+   distinct tradelines with correct identities and page locations.
+4. **Build stages 2–3** behind a setting, defaulting off — only after step 3.
 5. **Benchmark** batched-Sol against single-pass Sol on the reports that
    currently succeed, to confirm batching does not cost quality. Only then
    consider the A/B/C model comparison — cheaper models are a separate

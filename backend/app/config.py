@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     ai_document_audit_provider: str = ""
     ai_document_audit_model: str = ""
     ai_document_audit_effort: str = ""
+    ai_document_index_provider: str = ""
+    ai_document_index_model: str = ""
+    ai_document_index_effort: str = ""
 
     # AI-native document understanding: the extractor reads the ORIGINAL PDF.
     # Empty = auto (on when a provider credential is configured). "off" keeps
@@ -51,6 +54,9 @@ class Settings(BaseSettings):
     # How much rendering detail the provider gives each PDF page. Credit
     # reports have small text, two-column grids and payment-history tables.
     document_extraction_detail: str = "high"
+    # The index pass only has to find account headings and page numbers, not
+    # read small print in a payment grid, so it renders at low detail.
+    document_index_detail: str = "low"
     # Run the independent second-pass auditor over the same original PDF.
     document_audit_enabled: bool = True
     # Run the in-process extraction worker. Extraction is a durable background

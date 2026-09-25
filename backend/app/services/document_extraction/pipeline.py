@@ -21,6 +21,7 @@ from typing import Any
 
 from app.config import settings
 from app.services.ai import AIError, ModelTier, generate_document
+from app.services.document_extraction.index_schema import ReportIndex
 from app.services.document_extraction.schema import AuditReport, CreditReportExtraction
 from app.services.document_extraction.status import OPERATIONAL_REASONS, ExtractionStatus
 
@@ -276,6 +277,40 @@ def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> 
     return ExtractionStatus.VERIFIED, []
 
 
+INDEXER_SYSTEM = """You index consumer credit report PDFs. You LOCATE tradelines; you do not transcribe them.
+
+Read every page, including two-column layouts and continuation pages.
+
+Your entire job is to return, for this report: which bureau it is from, the date the document was \
+produced, the credit score and its name if printed, how many tradelines the report contains, and one \
+entry per tradeline giving its name, its masked account number, and the pages it appears on.
+
+Rules:
+- List EVERY tradeline: open, closed, paid, collection, charged off. A closed account is a tradeline. \
+A collection is a tradeline.
+- List each tradeline exactly ONCE, even where it spans several pages — record all of those pages in \
+`source_pages` instead.
+- Two entries with the same company name are two different tradelines when their account numbers \
+differ, or when they list different original creditors. Keep both.
+- The account's name is the company REPORTING it — the furnisher, or the collection agency. If the \
+report also names an original creditor, that goes in `original_creditor`, never in `creditor_name`. \
+A collection listed by "Caine & Weiner" with "Original creditor: Progressive" is the tradeline \
+"Caine & Weiner" with original creditor "Progressive".
+- `source_pages` is required for every entry. If you cannot say which page a tradeline is on, you \
+have not found it properly.
+- State `tradeline_count` from counting the document itself, not from counting your own list. If the \
+two disagree, that disagreement is the useful signal.
+- Do NOT return balances, credit limits, statuses, dates, payment histories or evidence excerpts. \
+They are read separately, later. Returning them here wastes the budget this pass exists to save."""
+
+
+def _index_prompt() -> str:
+    return (
+        "Index this credit report: identify the bureau, the document's date, the score, and locate "
+        "every tradeline it contains. Return only identity and page locations — no account details."
+    )
+
+
 @dataclass
 class PassFailure:
     """One failed expensive pass, kept in operator vocabulary.
@@ -334,6 +369,33 @@ class PassFailure:
             "reasoning_tokens": self.reasoning_tokens, "max_output_tokens": self.max_tokens,
             "latency_ms": round(self.latency_ms, 1), "response_id": self.response_id,
         }
+
+
+async def run_indexer(
+    document: bytes, *, filename: str = "credit-report.pdf", context: dict[str, Any] | None = None
+) -> tuple[ReportIndex | None, str | None, "PassFailure | None"]:
+    """Stage 1: locate every tradeline without reading any of them.
+
+    The cheap pass that makes the expensive ones bounded. Returns
+    (index, model, failure)."""
+    try:
+        generation = await generate_document(
+            ModelTier.DOCUMENT_INDEX,
+            system=INDEXER_SYSTEM,
+            prompt=_index_prompt(),
+            document=document,
+            filename=filename,
+            output_type=ReportIndex,
+            task="index_report_document",
+            context=context or {},
+            detail=settings.document_index_detail,
+        )
+    except AIError as e:
+        failure = PassFailure.from_error("index", e)
+        logger.warning("Document index failed (%s -> %s): %s%s",
+                       type(e).__name__, failure.status.value, e, failure.cost_note)
+        return None, None, failure
+    return generation.output, generation.model, None
 
 
 async def run_extractor(

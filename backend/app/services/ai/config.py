@@ -26,6 +26,9 @@ class ModelTier(str, Enum):
     # that re-reads the same document.
     DOCUMENT_EXTRACTION = "document_extraction"
     DOCUMENT_AUDIT = "document_audit"
+    # Stage 1 of scaled extraction: locate every tradeline, read nothing.
+    # Cheap enough for the smallest model, so it defaults to one.
+    DOCUMENT_INDEX = "document_index"
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,15 @@ _DEFAULTS: dict[ModelTier, TierConfig] = {
     # benchmark, Terra is the candidate cheaper extractor with Sol auditing.
     ModelTier.DOCUMENT_EXTRACTION: TierConfig(provider="openai", model="gpt-5.6-sol", max_tokens=32000),
     ModelTier.DOCUMENT_AUDIT: TierConfig(provider="openai", model="gpt-5.6-sol", max_tokens=16000),
+    # Indexing is naming and locating, not transcribing: ~80 output tokens per
+    # tradeline against ~2,100 for a detailed one. Luna is the starting point,
+    # with Terra as the escalation if the index quality gate fails.
+    #
+    # The budget is generous on purpose. max_output_tokens is a ceiling, not a
+    # reservation — an index that needs 1,500 tokens is billed for 1,500 — so
+    # headroom here costs nothing and removes the failure mode that a tight
+    # cap creates, where reasoning eats the budget and the answer is truncated.
+    ModelTier.DOCUMENT_INDEX: TierConfig(provider="openai", model="gpt-5.6-luna", max_tokens=16000),
 }
 
 

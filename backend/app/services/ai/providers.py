@@ -62,6 +62,26 @@ class DocumentUnsupported(AIConfigurationError):
     """Raised by providers that can't accept a raw document."""
 
 
+def _text_format_param(output_type: type[BaseModel]) -> dict:
+    """The Responses `text.format` payload for a strict structured output.
+
+    Prefers the SDK's own converter so the schema matches exactly what
+    responses.parse would have sent, and falls back to building it directly if
+    that private helper moves — the only thing it does is name the schema and
+    mark it strict."""
+    try:
+        from openai.lib._parsing._responses import type_to_text_format_param
+
+        return dict(type_to_text_format_param(output_type))
+    except Exception:  # pragma: no cover - SDK layout change
+        return {
+            "type": "json_schema",
+            "strict": True,
+            "name": output_type.__name__,
+            "schema": output_type.model_json_schema(),
+        }
+
+
 class AnthropicProvider:
     name = "anthropic"
 
@@ -242,11 +262,17 @@ class OpenAIProvider:
     ):
         start = time.monotonic()
         try:
-            response = await self._client.responses.parse(
+            # responses.create plus a local parse — deliberately NOT
+            # responses.parse. The parse helper validates inside the SDK and
+            # raises before the Response is ever returned, so a truncated
+            # answer (the most expensive failure there is: billed in full,
+            # worth nothing) arrives with no usage attached. Parsing here
+            # keeps the response, and therefore the bill, in hand.
+            response = await self._client.responses.create(
                 model=config.model,
                 instructions=system,
                 input=self.build_document_input(prompt, document, filename, detail),
-                text_format=output_type,
+                text={"format": _text_format_param(output_type)},
                 max_output_tokens=max_tokens,
                 # No Responses application-state persistence, and no
                 # Conversation object carrying the consumer's report. This is
@@ -288,16 +314,29 @@ class OpenAIProvider:
                      f" of max_output_tokens={max_tokens}")
             raise AIResponseError(f"Document response incomplete: {reason}{spent}", usage=billed)
 
-        parsed = getattr(response, "output_parsed", None)
-        if parsed is None:
-            refusal = next(
-                (c.refusal for item in (response.output or []) for c in (getattr(item, "content", None) or [])
-                 if getattr(c, "type", None) == "refusal"),
-                None,
-            )
-            if refusal:
-                raise AIRefusalError(f"Model declined the document request: {refusal}", usage=billed)
+        refusal = next(
+            (c.refusal for item in (response.output or []) for c in (getattr(item, "content", None) or [])
+             if getattr(c, "type", None) == "refusal"),
+            None,
+        )
+        if refusal:
+            raise AIRefusalError(f"Model declined the document request: {refusal}", usage=billed)
+
+        text = response.output_text
+        if not text:
             raise AIResponseError("Model returned no structured output for the document", usage=billed)
+        try:
+            parsed = output_type.model_validate_json(text)
+        except ValidationError as e:
+            # Where a truncated answer actually lands. The model stopped
+            # mid-string, so the JSON never closed. How many characters it did
+            # produce is the measurement that says how far over budget the
+            # request is, so it goes in the message.
+            raise AIResponseError(
+                f"Model output failed schema validation after {len(text):,} chars "
+                f"(max_output_tokens={max_tokens}): {e}",
+                usage=billed,
+            ) from e
 
         return ProviderResult(
             output=parsed,
