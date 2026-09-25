@@ -9,7 +9,9 @@ extracted for it — and that the two-pass result gates what happens next.
 The golden expectation is the Sep 24 2026 live Experian test, reproduced with
 synthetic account numbers and no consumer PII.
 """
+import json
 import time
+import uuid
 from io import BytesIO
 
 import httpx
@@ -273,19 +275,13 @@ async def test_missing_accounts_make_the_report_incomplete(client, document_ai):
 
 
 async def test_extraction_failure_does_not_lose_the_upload(client, document_ai, monkeypatch):
-    from app.services import document_extraction
-    from app.services.ai import AIProviderError
-
     document_ai()
-
-    async def boom(*args, **kwargs):
-        raise AIProviderError("OpenAI API error 503: unavailable")
-
-    monkeypatch.setattr(document_extraction.pipeline, "generate_document", boom)
+    _provider_failure(monkeypatch, "OpenAI API error 503: unavailable")
     response = await _upload(client, _pdf(SOURCE_PDF_TEXT))
     assert response.status_code == 200
     body = response.json()
-    assert body["extraction_status"] == "failed"
+    # A provider 5xx is our outage, not an unreadable document.
+    assert body["extraction_status"] == "provider_unavailable"
     assert body["total_accounts"] == 0
     # The original PDF is still stored and retrievable by its owner.
     assert (await client.get(f"/api/reports/{body['report_id']}/file")).status_code == 200
@@ -459,3 +455,127 @@ async def test_promotional_and_account_review_inquiries_are_not_hard(client, doc
     # Consumer-visible, non-scoring: never counted as hard inquiries.
     assert all(i["inquiry_type"] == "soft" for i in detail["inquiries"])
     assert not any(i["inquiry_type"] == "hard" for i in detail["inquiries"])
+
+
+# ── Provider failure is not a document failure ─────────────────────────────
+
+# What OpenAI actually returned in the live test.
+QUOTA_ERROR = (
+    "OpenAI API error 429: You exceeded your current quota, please check your plan and billing details. "
+    "(insufficient_quota / credit_balance_exhausted)"
+)
+
+
+def _provider_failure(monkeypatch, message=QUOTA_ERROR):
+    """Make the document provider fail the way OpenAI did live. Returns a
+    callable that restores just this patch, leaving the fixture's own
+    configuration (AI ingestion enabled) in place."""
+    from app.services import document_extraction
+    from app.services.ai import AIProviderError
+
+    original = document_extraction.pipeline.generate_document
+
+    async def boom(*args, **kwargs):
+        raise AIProviderError(message)
+
+    monkeypatch.setattr(document_extraction.pipeline, "generate_document", boom)
+
+    def restore():
+        monkeypatch.setattr(document_extraction.pipeline, "generate_document", original)
+
+    return restore
+
+
+async def test_quota_exhausted_is_reported_as_provider_unavailable(client, document_ai, monkeypatch):
+    document_ai()
+    _provider_failure(monkeypatch)
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+
+    assert body["extraction_status"] == "provider_unavailable"
+    assert body["extraction_method"] == "provider_unavailable"
+    warning = " ".join(body["warnings"])
+    assert "stored safely" in warning and "temporarily unavailable" in warning
+    assert "Retry extraction once the service is available" in warning
+    # Never blames the document, and never claims it holds no accounts.
+    for wrong in ("couldn't reliably read this PDF", "text-based PDF", "No accounts could be read"):
+        assert wrong not in warning
+
+
+async def test_provider_internals_never_reach_the_consumer(client, document_ai, monkeypatch):
+    document_ai()
+    _provider_failure(monkeypatch)
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+
+    leaked = ("429", "insufficient_quota", "credit_balance_exhausted", "quota", "billing",
+              "AIProviderError", "OpenAI")
+    payload = json.dumps([body, detail])
+    for token in leaked:
+        assert token not in payload, f"provider internals leaked: {token}"
+
+
+async def test_provider_error_is_kept_for_operators(client, document_ai, monkeypatch):
+    """The detail a maintainer needs is recorded on the report, just not in
+    any consumer-facing response."""
+    from app.database import async_session_maker
+    from app.models.credit_report import CreditReport
+
+    document_ai()
+    _provider_failure(monkeypatch)
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+
+    async with async_session_maker() as session:
+        report = await session.get(CreditReport, uuid.UUID(body["report_id"]))
+        assert "insufficient_quota" in report.extraction_audit["provider_error"]
+
+
+async def test_stored_original_survives_and_analysis_stays_blocked(client, document_ai, monkeypatch):
+    document_ai()
+    _provider_failure(monkeypatch)
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+
+    # The original PDF is safe and retrievable.
+    stored = await client.get(f"/api/reports/{body['report_id']}/file")
+    assert stored.status_code == 200 and stored.content.startswith(b"%PDF")
+    # And nothing is analyzable yet.
+    assert (await client.get("/api/accounts/")).json() == []
+
+
+async def test_retry_extraction_uses_the_stored_original(client, document_ai, monkeypatch):
+    """The outage clears and the consumer retries — without re-uploading."""
+    provider = document_ai()
+    restore = _provider_failure(monkeypatch)
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    assert body["extraction_status"] == "provider_unavailable"
+
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+    assert detail["extraction_retryable"] is True
+
+    # The outage clears; the mocked provider serves normally again.
+    restore()
+    retried = await client.post(f"/api/reports/{body['report_id']}/retry-extraction")
+    assert retried.status_code == 200, retried.text
+    result = retried.json()
+    assert result["extraction_status"] == "verified"
+    assert result["total_accounts"] == 15
+
+    # It re-read the same stored bytes rather than asking for the file again.
+    assert provider.documents and all(d == provider.documents[0] for d in provider.documents)
+    accounts = (await client.get("/api/accounts/")).json()
+    assert len(accounts) == 15
+
+
+async def test_retry_is_refused_once_a_report_has_accounts(client, document_ai):
+    document_ai()
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    assert body["extraction_status"] == "verified"
+    refused = await client.post(f"/api/reports/{body['report_id']}/retry-extraction")
+    assert refused.status_code == 409
+
+
+async def test_retry_requires_ownership(client, document_ai, monkeypatch):
+    document_ai()
+    _provider_failure(monkeypatch)
+    body = (await _upload(client, _pdf(SOURCE_PDF_TEXT))).json()
+    missing = await client.post(f"/api/reports/{uuid.uuid4()}/retry-extraction")
+    assert missing.status_code == 404

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api } from '../api'
 import PaymentHistory from '../components/PaymentHistory'
@@ -15,7 +16,11 @@ const STATUS = {
   // the consumer to re-upload here; the file was fine.
   needs_audit: ['warn', 'Read, not yet verified', 'This report was read successfully, but the verification pass found unresolved extraction differences. Dispute analysis is paused until those differences are reconciled. Nothing was auto-corrected.'],
   extraction_incomplete: ['error', 'Incomplete', "Your document wasn't read completely, so this report can't be used for dispute analysis yet. Re-uploading a text-based PDF may help."],
-  failed: ['error', 'Could not be read', 'Your original PDF is stored safely, but nothing could be extracted from it. Try re-uploading a text-based PDF.'],
+  // The document itself is the problem — the only case that should tell the
+  // consumer their PDF couldn't be read.
+  failed: ['error', "We couldn't reliably read this PDF", 'Your original is stored safely, but nothing could be extracted from it. A text-based PDF (rather than a scan or photo) usually works.'],
+  // Our service failed, not their file. Never suggest re-uploading here.
+  provider_unavailable: ['warn', 'Extraction unavailable', 'Your report was stored safely, but AI extraction is temporarily unavailable. No report data was analyzed. Retry extraction once the service is available.'],
 }
 
 export default function ReportDetail() {
@@ -42,6 +47,9 @@ export default function ReportDetail() {
                   {data.extraction_reasons.map((r, i) => <li key={i}>{r}</li>)}
                 </ul>
               )}
+              {/* Re-runs against the original already in storage — the
+                  consumer never has to find and upload the same file again. */}
+              {data.extraction_retryable && <RetryExtraction id={id} onDone={reload} />}
             </div>
           )}
           {data.score_type && data.credit_score != null && (
@@ -115,6 +123,30 @@ export default function ReportDetail() {
           )}
         </>
       )}
+    </div>
+  )
+}
+
+function RetryExtraction({ id, onDone }) {
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(null)
+  const retry = async () => {
+    setBusy(true); setFailed(null)
+    try {
+      await api.retryExtraction(id)
+      onDone()
+    } catch (e) {
+      setFailed(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button className="btn btn-sm" disabled={busy} onClick={retry}>
+        {busy ? <><span className="spinner" /> Retrying…</> : 'Retry extraction'}
+      </button>
+      {failed && <div className="small" style={{ marginTop: 6 }}>{failed}</div>}
     </div>
   )
 }

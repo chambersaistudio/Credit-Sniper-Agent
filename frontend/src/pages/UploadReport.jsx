@@ -44,17 +44,30 @@ export default function UploadReport() {
     // Never present a clean "added" result for a report we couldn't read and
     // verify — the state of the extraction leads.
     const verified = result.extraction_status === 'verified'
+    // Whether the document was analyzed at all. When the provider was
+    // unavailable we know nothing about its contents.
+    const analyzed = result.extraction_status !== 'provider_unavailable'
     return (
       <div className="content">
-        <PageHeader title={verified ? 'Report added' : 'Report needs review'} back="/reports" />
+        <PageHeader
+          title={!analyzed ? 'Report stored' : verified ? 'Report added' : 'Report needs review'}
+          back="/reports"
+        />
         <div className="card stack">
           <div className="row-between">
             <div className="card-title">{bureauName(result.bureau)}</div>
             <div className="card-title">{result.credit_score ?? '—'}</div>
           </div>
           <div className="grid-2">
-            <div className="stat"><div className="stat-label">Accounts read</div><div className="stat-value">{result.total_accounts}</div></div>
-            <div className="stat"><div className="stat-label">Inquiries read</div><div className="stat-value">{result.total_inquiries}</div></div>
+            {/* Nothing was read, so "0" would be a claim about the document. */}
+            <div className="stat">
+              <div className="stat-label">Accounts read</div>
+              <div className="stat-value">{analyzed ? result.total_accounts : '—'}</div>
+            </div>
+            <div className="stat">
+              <div className="stat-label">Inquiries read</div>
+              <div className="stat-value">{analyzed ? result.total_inquiries : '—'}</div>
+            </div>
           </div>
           {result.extraction_status === 'needs_audit' && (
             <div className="alert alert-warn">
@@ -62,7 +75,15 @@ export default function UploadReport() {
               differences. Dispute analysis is paused until those differences are reconciled.
             </div>
           )}
-          {!verified && result.extraction_status !== 'needs_audit' && (
+          {/* Our service was down, not their document — and nothing was read,
+              so we can't say the report contains no accounts. */}
+          {result.extraction_status === 'provider_unavailable' && (
+            <div className="alert alert-warn">
+              Your report was stored safely, but AI extraction is temporarily unavailable. No report data
+              was analyzed. Retry extraction once the service is available.
+            </div>
+          )}
+          {!verified && !['needs_audit', 'provider_unavailable'].includes(result.extraction_status) && (
             <div className="alert alert-error">
               Your original PDF is stored safely, but it couldn't be read completely, so dispute analysis
               is on hold for this report.

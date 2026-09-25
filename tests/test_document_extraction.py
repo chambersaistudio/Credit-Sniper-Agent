@@ -256,7 +256,12 @@ async def test_document_content_never_reaches_the_logs(caplog, monkeypatch):
     with caplog.at_level(logging.DEBUG):
         result = await document_extraction.extract_document(document, context={"user_id": "u"})
 
-    assert result.status is ExtractionStatus.FAILED
+    # A provider error is an outage, not an unreadable document.
+    assert result.status is ExtractionStatus.PROVIDER_UNAVAILABLE
+    # The provider's own message is kept for operators...
+    assert "upstream failure" in result.provider_error
+    # ...but the consumer-facing reason says nothing about their PDF.
+    assert result.reasons == ["AI extraction was unavailable, so the document was never analyzed."]
     logged = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in logged
     assert base64.b64encode(document).decode()[:24] not in logged

@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 SUPPORTED_BUREAUS = {"equifax", "experian", "transunion"}
+
+# Said to the consumer when the AI provider — not their document — failed.
+# Deliberately free of provider internals: quota, rate limits and 5xx are our
+# operational problem, and the detail belongs in logs and telemetry.
+PROVIDER_UNAVAILABLE_MESSAGE = (
+    "Your report was stored safely, but AI extraction is temporarily unavailable. "
+    "No report data was analyzed. Retry extraction once the service is available."
+)
 MAX_SIZE_BYTES = settings.max_file_size_mb * 1024 * 1024
 PDF_MAGIC = b"%PDF-"
 
@@ -127,9 +135,14 @@ async def _ingest_with_document_model(
     decides whether the result may be relied on."""
     result = await extract_document(document, context={"user_id": str(user_id)})
     if result.extraction is None:
+        # Distinguish "the provider was unavailable" from "we read the
+        # document and couldn't make sense of it". Only the latter says
+        # anything about the consumer's PDF.
+        provider_failure = result.status is ExtractionStatus.PROVIDER_UNAVAILABLE
         return IngestOutcome(
             accounts=[], inquiries=[], quality=assess_accounts([]), status=result.status,
-            method="document_failed", reasons=result.reasons, audit=result.audit_to_dict(),
+            method="provider_unavailable" if provider_failure else "document_failed",
+            reasons=result.reasons, audit=result.audit_to_dict(),
             bureau=parsed.get("bureau", "unknown"),
         )
 
@@ -223,6 +236,55 @@ async def _ingest_with_parser(
     )
 
 
+async def _persist_outcome(
+    db: AsyncSession, report: CreditReport, outcome: "IngestOutcome", parsed: dict[str, Any],
+    chosen_bureau: str, user_id: uuid.UUID,
+) -> tuple[list[CreditAccount], list[dict[str, Any]]]:
+    """Write one extraction outcome onto a report. Shared by upload and retry
+    so a retried extraction lands exactly like a first one."""
+    raw_inquiries = [inq for inq in outcome.inquiries if not inquiry_is_suspicious(inq)]
+
+    report.bureau = chosen_bureau
+    report.credit_score = outcome.credit_score
+    report.score_type = outcome.score_type
+    report.on_file_since = outcome.on_file_since
+    report.report_date = _to_datetime(outcome.report_date)
+    report.extraction_status = outcome.status.value
+    report.extraction_audit = outcome.audit
+    report.public_records = outcome.public_records
+    report.parsed_data = {
+        "personal_info": parsed.get("personal_info", {}),
+        "pages": parsed.get("pages"),
+        "extraction_method": outcome.method,
+        "extraction_quality": outcome.quality.to_dict(),
+        "extraction_reasons": outcome.reasons,
+        "ungrounded_values_dropped": outcome.ungrounded_values_dropped,
+        "redactions_before_ai": outcome.redactions,
+        # The deterministic parser stays on as a cross-check, never as the
+        # authority: a disagreement is recorded, not silently resolved.
+        "parser_cross_check": outcome.cross_check,
+    }
+
+    accounts = [_build_account(report.id, chosen_bureau, raw) for raw in outcome.accounts]
+    db.add_all(accounts)
+    db.add_all(
+        CreditInquiry(
+            report_id=report.id,
+            bureau=chosen_bureau,
+            creditor_name=inq.get("creditor_name"),
+            inquiry_date=inq.get("inquiry_date"),
+            # No default: an inquiry is only hard when the document says so.
+            inquiry_type=inq.get("inquiry_type"),
+            inquiry_category=inq.get("inquiry_category"),
+            business_type=inq.get("business_type"),
+        )
+        for inq in raw_inquiries
+    )
+    await db.flush()
+    await link_accounts(db, user_id, accounts)
+    return accounts, raw_inquiries
+
+
 @router.post("/upload", response_model=dict[str, Any])
 async def upload_credit_report(
     file: UploadFile = File(...),
@@ -276,48 +338,8 @@ async def upload_credit_report(
         outcome = await _ingest_with_parser(parsed, raw_text, user, resolved_user_id)
 
     chosen_bureau = _choose_bureau(bureau, outcome.bureau)
-    raw_accounts = outcome.accounts
-    raw_inquiries = [inq for inq in outcome.inquiries if not inquiry_is_suspicious(inq)]
+    accounts, raw_inquiries = await _persist_outcome(db, report, outcome, parsed, chosen_bureau, resolved_user_id)
     quality = outcome.quality
-
-    report.bureau = chosen_bureau
-    report.credit_score = outcome.credit_score
-    report.score_type = outcome.score_type
-    report.on_file_since = outcome.on_file_since
-    report.report_date = _to_datetime(outcome.report_date)
-    report.extraction_status = outcome.status.value
-    report.extraction_audit = outcome.audit
-    report.public_records = outcome.public_records
-    report.parsed_data = {
-        "personal_info": parsed.get("personal_info", {}),
-        "pages": parsed.get("pages"),
-        "extraction_method": outcome.method,
-        "extraction_quality": quality.to_dict(),
-        "extraction_reasons": outcome.reasons,
-        "ungrounded_values_dropped": outcome.ungrounded_values_dropped,
-        "redactions_before_ai": outcome.redactions,
-        # The deterministic parser stays on as a cross-check, never as the
-        # authority: a disagreement is recorded, not silently resolved.
-        "parser_cross_check": outcome.cross_check,
-    }
-
-    accounts = [_build_account(report.id, chosen_bureau, raw) for raw in raw_accounts]
-    db.add_all(accounts)
-    db.add_all(
-        CreditInquiry(
-            report_id=report.id,
-            bureau=chosen_bureau,
-            creditor_name=inq.get("creditor_name"),
-            inquiry_date=inq.get("inquiry_date"),
-            # No default: an inquiry is only hard when the document says so.
-            inquiry_type=inq.get("inquiry_type"),
-            inquiry_category=inq.get("inquiry_category"),
-            business_type=inq.get("business_type"),
-        )
-        for inq in raw_inquiries
-    )
-    await db.flush()
-    await link_accounts(db, resolved_user_id, accounts)
     await db.commit()
 
     return {
@@ -348,8 +370,12 @@ def _warnings(outcome: "IngestOutcome", account_count: int) -> list[str]:
                 f"{outcome.ungrounded_values_dropped} extracted value(s) didn't appear in the document "
                 "and were left blank."
             )
-    if outcome.status is ExtractionStatus.FAILED or account_count == 0:
-        warnings.append("No accounts could be read from this report.")
+    if outcome.status is ExtractionStatus.PROVIDER_UNAVAILABLE:
+        # The document was never analyzed, so nothing may be said about what
+        # it contains — least of all that it holds no accounts.
+        warnings.append(PROVIDER_UNAVAILABLE_MESSAGE)
+    elif outcome.status is ExtractionStatus.FAILED or account_count == 0:
+        warnings.append("We couldn't reliably read this PDF, so no accounts were extracted from it.")
     elif outcome.status is ExtractionStatus.NEEDS_AUDIT:
         # Read fine; the verification pass disagreed. Don't suggest re-uploading.
         warnings.append(
@@ -414,6 +440,68 @@ async def get_report(
     }
 
 
+@router.post("/{report_id}/retry-extraction", response_model=dict[str, Any])
+async def retry_extraction(
+    report_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    """Re-run extraction against the original PDF already stored for this
+    report, so a provider outage doesn't make the consumer upload the same
+    file again.
+
+    Only offered while the report holds no extracted accounts — that is the
+    outage case. Once accounts exist they may already carry evaluations and
+    cases, and replacing them is a different (destructive) operation."""
+    report = await _owned_report(db, report_id, user.id)
+    status = ExtractionStatus(report.extraction_status)
+    if not status.is_retryable:
+        raise HTTPException(status_code=409, detail="This report doesn't need re-extraction.")
+    if report.accounts:
+        raise HTTPException(
+            status_code=409,
+            detail="This report already has extracted accounts. Upload the report again to replace them.",
+        )
+    if not report.storage_key:
+        raise HTTPException(status_code=409, detail="The original file for this report is no longer available.")
+
+    try:
+        document = await get_storage().get(report.storage_key)
+    except Exception:
+        logger.exception("Reading stored report for retry failed")
+        raise HTTPException(status_code=503, detail="Couldn't read the stored report file. Try again.")
+
+    try:
+        parsed = await run_in_threadpool(parse_credit_report_pdf, document)
+    except Exception as e:
+        logger.exception("PDF parse failed on retry")
+        raise HTTPException(status_code=422, detail=f"Could not read this PDF: {e}")
+
+    if settings.document_extraction_enabled:
+        outcome = await _ingest_with_document_model(document, parsed, report.bureau, user.id)
+    else:
+        outcome = await _ingest_with_parser(parsed, report.raw_text or "", user, user.id)
+
+    # Keep the bureau already on the report if this attempt can't tell.
+    bureau = outcome.bureau if outcome.bureau in SUPPORTED_BUREAUS else report.bureau
+    # Old inquiries would otherwise be duplicated by a successful retry.
+    for inquiry in list(report.inquiries):
+        await db.delete(inquiry)
+    await db.flush()
+
+    accounts, raw_inquiries = await _persist_outcome(db, report, outcome, parsed, bureau, user.id)
+    await db.commit()
+
+    return {
+        "report_id": str(report.id),
+        "bureau": bureau,
+        "extraction_status": report.extraction_status,
+        "extraction_method": outcome.method,
+        "total_accounts": len(accounts),
+        "total_inquiries": len(raw_inquiries),
+        "extraction_complete": outcome.quality.complete,
+        "warnings": _warnings(outcome, len(accounts)),
+    }
+
+
 @router.get("/{report_id}/file")
 async def download_report_file(
     report_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
@@ -458,6 +546,11 @@ def _report_summary(report: CreditReport) -> dict[str, Any]:
         # result for a report we couldn't read properly.
         "extraction_status": report.extraction_status,
         "extraction_verified": report.extraction_status == ExtractionStatus.VERIFIED.value,
+        # Whether re-running extraction on the stored original could help.
+        # Status only — this summary is used by the list endpoint, where the
+        # accounts relationship isn't loaded; the retry route does the rest of
+        # the checking.
+        "extraction_retryable": ExtractionStatus(report.extraction_status).is_retryable,
         "extraction_reasons": parsed.get("extraction_reasons") or [],
     }
 

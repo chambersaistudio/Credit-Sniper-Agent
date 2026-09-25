@@ -61,7 +61,16 @@ def _extraction_incomplete_proposal(records: list[dict[str, Any]] | None = None)
     statuses = {
         (r.get("extraction_status") or ExtractionStatus.EXTRACTION_INCOMPLETE.value) for r in (records or [])
     }
-    if ExtractionStatus.NEEDS_AUDIT.value in statuses:
+    if ExtractionStatus.PROVIDER_UNAVAILABLE.value in statuses:
+        # Nothing was read, so nothing can be judged — and the consumer's
+        # document is not the problem.
+        reasoning = (
+            "This account couldn't be evaluated because AI extraction was unavailable when its report was "
+            "uploaded, so the report was never analyzed. Your report is stored safely. Retry extraction "
+            "once the service is available and this account can be evaluated then."
+        )
+        needed = ["A successful extraction of the report this account came from."]
+    elif ExtractionStatus.NEEDS_AUDIT.value in statuses:
         # The document was read fine — the verification pass just disagreed.
         # Telling the consumer to re-upload here would be wrong and useless.
         reasoning = (

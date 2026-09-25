@@ -96,6 +96,9 @@ class DocumentExtractionResult:
     reasons: list[str] = field(default_factory=list)
     extractor_model: str | None = None
     auditor_model: str | None = None
+    # Operator detail: the provider's own error. Recorded for logs and admin
+    # telemetry and deliberately never surfaced in a consumer-facing response.
+    provider_error: str | None = None
 
     def audit_to_dict(self) -> dict[str, Any]:
         """What we persist about the audit — findings and counts, never the
@@ -109,6 +112,8 @@ class DocumentExtractionResult:
             "audit": self.audit.model_dump() if self.audit else None,
             # Kept visible, but they did not hold the report back.
             "set_aside": [{**f.model_dump(), "set_aside_because": why} for f, why in benign],
+            # Operator-only; the report endpoints never return this field.
+            "provider_error": self.provider_error,
         }
 
 
@@ -289,9 +294,16 @@ async def extract_document(
             detail=settings.document_extraction_detail,
         )
     except AIError as e:
-        # Message only — never the document or the request body.
-        logger.warning("Document extraction failed: %s", type(e).__name__)
-        return DocumentExtractionResult(None, None, ExtractionStatus.FAILED, [f"Document extraction failed: {e}"])
+        # The provider failed us; we never read the document. Nothing is known
+        # about the report's contents, so this must not be reported as a
+        # problem with the consumer's PDF. The provider's own message goes to
+        # the logs and the audit record, never to the consumer.
+        logger.warning("Document extraction unavailable (%s): %s", type(e).__name__, e)
+        return DocumentExtractionResult(
+            None, None, ExtractionStatus.PROVIDER_UNAVAILABLE,
+            ["AI extraction was unavailable, so the document was never analyzed."],
+            provider_error=f"{type(e).__name__}: {e}",
+        )
 
     extraction = first.output
     audit = None
