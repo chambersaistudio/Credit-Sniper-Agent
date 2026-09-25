@@ -601,3 +601,184 @@ class TestConcurrency:
             await db.commit()
 
         assert await claim_next() == report_id
+
+
+# ── Finding 1, second half: Stage-1 index claiming ──────────────────────
+# Codex's finding 1 named run_report_batch AND index_report. The first patch
+# fixed only the batch path; ChatGPT's review caught that index_report was
+# still check-then-call. Same hazard, same money.
+
+@requires_db
+class TestIndexClaiming:
+    @staticmethod
+    async def _report():
+        from app.database import async_session_maker
+        from app.models.credit_report import CreditReport
+        from app.models.user import User
+        from app.services.storage import get_storage, report_key
+
+        async with async_session_maker() as db:
+            user = User(email=f"idx-{uuid.uuid4().hex[:8]}@example.com", full_name="QA")
+            db.add(user)
+            await db.flush()
+            report = CreditReport(user_id=user.id, bureau="experian", source="manual_upload",
+                                  raw_text="x", extraction_status="extraction_incomplete")
+            db.add(report)
+            await db.flush()
+            report.storage_key = report_key(user.id, report.id)
+            await get_storage().put(report.storage_key, _pdf(28), "application/pdf")
+            await db.commit()
+            return report.id
+
+    @staticmethod
+    async def _checkpoint(report_id):
+        from app.database import async_session_maker
+        from app.models.credit_report import CreditReport
+
+        async with async_session_maker() as db:
+            row = await db.get(CreditReport, report_id)
+            return row.extraction_checkpoint or {}
+
+    async def test_two_concurrent_index_calls_buy_exactly_one_index(self, db_ready, index_ai):
+        """The review's explicit ask. Both callers saw no index and both paid."""
+        from app.services.checkpoint_claim import IndexAlreadyRunning
+        from app.services.index_job import index_report
+
+        provider = index_ai(output=golden_index(total_pages=28))
+        report_id = await self._report()
+
+        results = await asyncio.gather(
+            index_report(report_id, expected_tradelines=15),
+            index_report(report_id, expected_tradelines=15),
+            return_exceptions=True,
+        )
+        refused = [r for r in results if isinstance(r, IndexAlreadyRunning)]
+        succeeded = [r for r in results if not isinstance(r, BaseException)]
+
+        assert len(refused) == 1, "the second caller was not refused"
+        assert len(succeeded) == 1 and succeeded[0].ok
+        assert len(provider.calls) == 1, "the index was purchased twice"
+
+    async def test_a_failed_index_releases_its_claim(self, db_ready, index_ai):
+        from app.services.ai import AIProviderError
+        from app.services.checkpoint_claim import claim_state
+        from app.services.index_job import index_report
+
+        index_ai(error=AIProviderError("OpenAI API error 429: insufficient_quota"))
+        report_id = await self._report()
+        await index_report(report_id, expected_tradelines=15)
+
+        from app.database import async_session_maker
+        from app.models.credit_report import CreditReport
+
+        async with async_session_maker() as db:
+            row = await db.get(CreditReport, report_id)
+        assert claim_state(row) == {}, "a failed index left its claim behind"
+
+    async def test_a_stale_index_claim_does_not_block_forever(self, db_ready, index_ai):
+        from app.database import async_session_maker
+        from app.models.credit_report import CreditReport
+        from app.services.index_job import index_report
+
+        provider = index_ai(output=golden_index(total_pages=28))
+        report_id = await self._report()
+        async with async_session_maker() as db:
+            row = await db.get(CreditReport, report_id)
+            row.extraction_checkpoint = {"claims": {"index": {
+                "claimed_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()}}}
+            await db.commit()
+
+        result = await index_report(report_id, expected_tradelines=15, lease_seconds=60)
+        assert result.ok and result.banked
+        assert len(provider.calls) == 1
+
+    async def test_banking_an_index_does_not_erase_a_batch_banked_meanwhile(
+        self, db_ready, index_ai
+    ):
+        """index_report wrote a checkpoint it had read before the model call,
+        so a batch that landed during indexing was erased. Same lost-update
+        class as finding 2, on the other path."""
+        from app.database import async_session_maker
+        from app.models.credit_report import CreditReport
+        from app.services.index_job import index_report
+
+        provider = index_ai(output=golden_index(total_pages=28))
+        report_id = await self._report()
+        original = provider.generate_document
+
+        async def land_a_batch_midway(config, **kwargs):
+            async with async_session_maker() as db:
+                row = await db.get(CreditReport, report_id)
+                checkpoint = dict(row.extraction_checkpoint or {})
+                row.extraction_checkpoint = {
+                    **checkpoint,
+                    "batches": {"b0": {"batch": {"accounts": [{"creditor_name": "LANDED"}]},
+                                       "model": "gpt-5.6-sol"}},
+                }
+                await db.commit()
+            provider.generate_document = original
+            return await original(config, **kwargs)
+
+        provider.generate_document = land_a_batch_midway
+        result = await index_report(report_id, expected_tradelines=15)
+
+        assert result.banked
+        checkpoint = await self._checkpoint(report_id)
+        assert checkpoint["index"]["tradelines"], "the index was not banked"
+        assert checkpoint["batches"]["b0"]["batch"]["accounts"][0]["creditor_name"] == "LANDED"
+
+    async def test_a_banked_index_is_still_reused_without_a_model_call(self, db_ready, index_ai):
+        from app.services.index_job import index_report
+
+        provider = index_ai(output=golden_index(total_pages=28))
+        report_id = await self._report()
+        await index_report(report_id, expected_tradelines=15)
+        again = await index_report(report_id, expected_tradelines=15)
+
+        assert again.reused and again.ok
+        assert len(provider.calls) == 1
+
+
+# ── One claim implementation, used by both paid passes ──────────────────
+
+def test_both_paid_passes_use_the_same_claim_implementation():
+    """Two implementations of a money-guard drift, and the one that drifts is
+    the one nobody is looking at."""
+    from pathlib import Path
+
+    from app.services import batch_job, index_job
+
+    for module in (batch_job, index_job):
+        source = Path(module.__file__).read_text()
+        assert "from app.services.checkpoint_claim import" in source
+        assert "take_claim" in source and "drop_claim" in source and "lock_report" in source
+        # No local re-implementation left behind.
+        assert "def _claim_is_live" not in source
+        assert "FOR UPDATE" not in source, "the lock belongs in the shared module"
+
+
+def test_a_claim_with_an_unreadable_timestamp_is_treated_as_abandoned():
+    """A marker nobody can parse is not protecting anything, and must not
+    strand a paid pass forever."""
+    from app.services.checkpoint_claim import claim_is_live
+
+    assert not claim_is_live({"claimed_at": "not-a-date"})
+    assert not claim_is_live({"claimed_at": None})
+    assert not claim_is_live({})
+    assert not claim_is_live(None)
+    assert claim_is_live({"claimed_at": datetime.now(timezone.utc).isoformat()})
+
+
+def test_a_naive_claim_timestamp_is_read_as_utc_not_crashed_on():
+    from app.services.checkpoint_claim import claim_is_live
+
+    naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    assert claim_is_live({"claimed_at": naive})
+
+
+def test_dropping_the_last_claim_leaves_no_residue():
+    from app.services.checkpoint_claim import drop_claim, take_claim
+
+    checkpoint = take_claim({"index": {"tradelines": []}}, "index")
+    assert "claims" in checkpoint
+    assert drop_claim(checkpoint, "index") == {"index": {"tradelines": []}}

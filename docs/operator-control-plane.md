@@ -122,10 +122,14 @@ model call that another worker could slip through.
   `processing_claimed_at` lease (`EXTRACTION_CLAIM_LEASE_SECONDS`, default
   1800). Re-queueing clears the claim, so a deliberate retry does not wait it
   out.
-- **Batches** claim under a row lock on the report, record an in-flight marker
-  with a lease, release the lock for the model call, then re-lock and merge
-  the result into a *freshly read* checkpoint. Merging into a snapshot taken
-  before the call would erase any batch that finished while this one ran.
+- **Every paid pass on a report** — the Stage-1 index and each Stage-2 batch —
+  uses one shared implementation (`services/checkpoint_claim.py`): lock the
+  report row, confirm the slot is neither done nor claimed, write a claim
+  marker with a lease, commit; release the lock for the model call; then
+  re-lock, re-read the checkpoint *fresh*, merge and drop the claim. Merging
+  into a snapshot taken before the call would erase whatever another slot
+  banked meanwhile. It is one module on purpose: two implementations of a
+  money-guard drift, and the one that drifts is the one nobody is watching.
 - **A banked batch is keyed by plan fingerprint, not by its ordinal id.** "b0"
   is a position; re-indexing can put different tradelines there, and serving
   the old detail under the new name would attach one account's balances to

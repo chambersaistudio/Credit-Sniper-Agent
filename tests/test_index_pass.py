@@ -333,7 +333,11 @@ class TestIndexCheckpoint:
         result = await index_report(report_id, expected_tradelines=15)
 
         assert not result.ok and not result.banked
-        assert (await self._row(report_id)).extraction_checkpoint in (None, {})
+        # Nothing about a failed index is kept, and no bookkeeping residue
+        # either — the claim is released cleanly.
+        checkpoint = (await self._row(report_id)).extraction_checkpoint or {}
+        assert "index" not in checkpoint
+        assert checkpoint == {}
 
     async def test_banking_an_index_preserves_an_existing_extraction_checkpoint(
         self, db_ready, index_ai

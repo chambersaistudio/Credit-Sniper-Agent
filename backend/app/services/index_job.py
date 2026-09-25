@@ -19,6 +19,10 @@ from typing import Any
 
 from app.database import async_session_maker
 from app.models.credit_report import CreditReport
+from app.services.checkpoint_claim import (
+    DEFAULT_LEASE_SECONDS, INDEX_SLOT, IndexAlreadyRunning, SlotAlreadyRunning,
+    drop_claim, lock_report, release, take_claim,
+)
 from app.services.document_extraction.index_quality import IndexQuality, assess_index
 from app.services.document_extraction.index_schema import ReportIndex
 from app.services.document_extraction.page_bundle import page_count
@@ -108,22 +112,29 @@ async def index_document(
 async def index_report(
     report_id, *, session_factory=None, expected_tradelines: int | None = None,
     bank_failed: bool = False, force: bool = False,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> IndexResult:
     """Index the original PDF already stored for a report, and checkpoint it.
 
-    Idempotent: a report that already has a passing banked index is returned
-    as-is rather than re-indexed. Running this command twice by hand must not
-    buy the same index twice — a checkpoint is a promise that the work behind
-    it need not be repeated, and that promise has to be honoured by the code
-    that would otherwise repeat it. `force` re-indexes deliberately.
+    Idempotent and claimed, in three transactions — the same shape the Stage-2
+    batches use, because it has the same hazard: deciding "no index yet" and
+    recording "index banked" are separated by a paid model call.
 
-    Only a passing index is banked: an index that failed its quality gate is
-    not work anyone should build on."""
+      1. lock the row, reuse a passing banked index if there is one, otherwise
+         claim the index slot and commit — a second caller now sees the claim
+      2. read the document and index it, holding no lock
+      3. re-lock, re-read the checkpoint FRESH, merge the index in and drop
+         the claim
+
+    Step 3 re-reading is what stops this erasing a batch that was banked while
+    the index was running. `force` re-indexes deliberately; only a passing
+    index is banked, since one that failed its gate is not work to build on.
+    """
     factory = session_factory or async_session_maker
+
+    # ── 1. Reuse or claim, under the row lock ───────────────────────────
     async with factory() as db:
-        report = await db.get(CreditReport, report_id)
-        if report is None:
-            raise LookupError(f"no report {report_id}")
+        report = await lock_report(db, report_id)
         if not report.storage_key:
             raise LookupError(f"report {report_id} has no stored original")
 
@@ -136,26 +147,43 @@ async def index_report(
             result.reused = True
             return result
 
-        document = await get_storage().get(report.storage_key)
+        try:
+            report.extraction_checkpoint = take_claim(
+                dict(report.extraction_checkpoint or {}), INDEX_SLOT,
+                lease_seconds=lease_seconds, force=force,
+            )
+        except SlotAlreadyRunning:
+            raise IndexAlreadyRunning(
+                f"report {report_id} is already being indexed"
+            ) from None
+        user_id, storage_key = report.user_id, report.storage_key
+        await db.commit()
+
+    # ── 2. The paid pass, holding no lock ───────────────────────────────
+    try:
+        document = await get_storage().get(storage_key)
         result = await index_document(
             document,
-            context={"user_id": str(report.user_id), "report_id": str(report.id), "stage": "index"},
+            context={"user_id": str(user_id), "report_id": str(report_id), "stage": "index"},
             expected_tradelines=expected_tradelines,
         )
+    except BaseException:
+        await release(factory, report_id, INDEX_SLOT)
+        raise
+
+    # ── 3. Bank into a freshly read checkpoint ──────────────────────────
+    async with factory() as db:
+        report = await lock_report(db, report_id)
+        checkpoint = drop_claim(dict(report.extraction_checkpoint or {}), INDEX_SLOT)
 
         if result.index is not None and (result.quality.ok or bank_failed):
-            # Rebuilt rather than mutated: a plain JSON column compares the old
-            # value to the new one, so mutating the dict already on the row
-            # leaves the update invisible to the flush.
-            checkpoint = dict(report.extraction_checkpoint or {})
-            report.extraction_checkpoint = {
+            checkpoint = {
                 **checkpoint,
                 "index": result.index.model_dump(mode="json"),
                 "index_model": result.model,
                 "index_quality": result.quality.to_dict(),
                 "indexed_at": datetime.now(timezone.utc).isoformat(),
             }
-            await db.commit()
             result.banked = True
             logger.info("Report %s: index banked (%d tradelines, model %s)",
                         report_id, result.quality.listed, result.model)
@@ -165,4 +193,9 @@ async def index_report(
         else:
             logger.warning("Report %s: index rejected by the quality gate: %s",
                            report_id, "; ".join(result.quality.reasons))
+
+        # Rebuilt, never mutated: a plain JSON column compares old to new, so
+        # mutating the dict already on the row hides the update from the flush.
+        report.extraction_checkpoint = checkpoint
+        await db.commit()
         return result

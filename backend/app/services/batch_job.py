@@ -19,10 +19,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import text
-
 from app.database import async_session_maker
 from app.models.credit_report import CreditReport
+from app.services.checkpoint_claim import (
+    DEFAULT_LEASE_SECONDS, BatchAlreadyRunning, SlotAlreadyRunning, batch_slot,
+    drop_claim, lock_report, release, take_claim,
+)
 from app.services.document_extraction.batch_quality import BatchQuality, assess_batch
 from app.services.document_extraction.batch_schema import TradelineBatch
 from app.services.document_extraction.batching import (
@@ -148,40 +150,12 @@ async def extract_batch(
     return BatchResult(plan, batch, used_model, failure, quality, bundle, remap, banked=False)
 
 
-# ── Claiming ────────────────────────────────────────────────────────────
-# Reading a batch costs money, so "is it already banked?" and "bank it" must
-# not be separated by a 60-second model call that another worker can slip
-# through. Both ends are done under a row lock on the report, and the long
-# call happens between them with an in-flight marker recorded — so a second
-# worker sees the claim rather than an empty slot.
-
-_LOCK_REPORT = text("SELECT 1 FROM credit_reports WHERE id = :rid FOR UPDATE")
-
-
-def _claim_is_live(entry: dict | None, lease_seconds: int) -> bool:
-    """Is another worker still plausibly running this batch?"""
-    if not entry:
-        return False
-    claimed = entry.get("claimed_at")
-    if not claimed:
-        return False
-    try:
-        started = datetime.fromisoformat(claimed)
-    except ValueError:
-        return False
-    return datetime.now(timezone.utc) - started < timedelta(seconds=lease_seconds)
-
-
-class BatchAlreadyRunning(RuntimeError):
-    """Another worker holds the claim on this batch."""
-
-
 async def run_report_batch(
     report_id, batch_id: str, *, session_factory=None,
     batch_size: int = DEFAULT_BATCH_SIZE, context_pages: int = DEFAULT_CONTEXT_PAGES,
     force: bool = False, bank_failed: bool = False,
     model: str | None = None, detail: str | None = None,
-    lease_seconds: int = 900,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> BatchResult:
     """Run ONE batch of a report and checkpoint it independently.
 
@@ -201,13 +175,9 @@ async def run_report_batch(
 
     # ── 1. Claim ────────────────────────────────────────────────────────
     async with factory() as db:
-        report = await db.get(CreditReport, report_id)
-        if report is None:
-            raise LookupError(f"no report {report_id}")
+        report = await lock_report(db, report_id)
         if not report.storage_key:
             raise LookupError(f"report {report_id} has no stored original")
-        await db.execute(_LOCK_REPORT, {"rid": str(report.id)})
-        await db.refresh(report)
 
         plans = batch_plans(report, batch_size=batch_size, context_pages=context_pages)
         plan = next((p for p in plans if p.batch_id == batch_id), None)
@@ -236,16 +206,15 @@ async def run_report_batch(
             logger.warning("Report %s batch %s was banked for different tradelines; re-reading",
                            report_id, batch_id)
 
-        in_flight = dict(checkpoint.get("batches_in_flight") or {})
-        if _claim_is_live(in_flight.get(batch_id), lease_seconds) and not force:
+        try:
+            report.extraction_checkpoint = take_claim(
+                checkpoint, batch_slot(batch_id), fingerprint=plan_fingerprint(plan),
+                lease_seconds=lease_seconds, force=force,
+            )
+        except SlotAlreadyRunning:
             raise BatchAlreadyRunning(
                 f"batch {batch_id} of report {report_id} is already being read"
-            )
-        in_flight[batch_id] = {
-            "claimed_at": datetime.now(timezone.utc).isoformat(),
-            "plan_fingerprint": plan_fingerprint(plan),
-        }
-        report.extraction_checkpoint = {**checkpoint, "batches_in_flight": in_flight}
+            ) from None
         await db.commit()
 
     # ── 2. The expensive part, holding no lock ──────────────────────────
@@ -257,18 +226,14 @@ async def run_report_batch(
             "user_id": str(report.user_id), "report_id": str(report.id), "stage": "batch",
         })
     except BaseException:
-        await _release_claim(factory, report_id, batch_id)
+        await release(factory, report_id, batch_slot(batch_id))
         raise
 
     # ── 3. Bank, merging into a freshly read checkpoint ─────────────────
     async with factory() as db:
-        report = await db.get(CreditReport, report_id)
-        await db.execute(_LOCK_REPORT, {"rid": str(report.id)})
-        await db.refresh(report)
-        checkpoint = dict(report.extraction_checkpoint or {})
+        report = await lock_report(db, report_id)
+        checkpoint = drop_claim(dict(report.extraction_checkpoint or {}), batch_slot(batch_id))
         banked = dict(checkpoint.get("batches") or {})
-        in_flight = dict(checkpoint.get("batches_in_flight") or {})
-        in_flight.pop(batch_id, None)
 
         if result.batch is not None and (result.quality.ok or bank_failed):
             banked[batch_id] = {
@@ -296,30 +261,9 @@ async def run_report_batch(
 
         # Rebuilt, never mutated: a plain JSON column compares old to new, so
         # mutating the dict already on the row hides the update from the flush.
-        report.extraction_checkpoint = {**checkpoint, "batches": banked,
-                                        "batches_in_flight": in_flight}
+        report.extraction_checkpoint = {**checkpoint, "batches": banked}
         await db.commit()
         return result
-
-
-async def _release_claim(factory, report_id, batch_id: str) -> None:
-    """Drop an in-flight marker after a failure, so a retry is not blocked
-    until the lease expires."""
-    try:
-        async with factory() as db:
-            report = await db.get(CreditReport, report_id)
-            if report is None:
-                return
-            await db.execute(_LOCK_REPORT, {"rid": str(report.id)})
-            await db.refresh(report)
-            checkpoint = dict(report.extraction_checkpoint or {})
-            in_flight = dict(checkpoint.get("batches_in_flight") or {})
-            if in_flight.pop(batch_id, None) is not None:
-                report.extraction_checkpoint = {**checkpoint, "batches_in_flight": in_flight}
-                await db.commit()
-    except Exception:
-        logger.exception("Could not release the claim on report %s batch %s",
-                         report_id, batch_id)
 
 
 def batch_status(report: CreditReport, *, batch_size: int = DEFAULT_BATCH_SIZE,
