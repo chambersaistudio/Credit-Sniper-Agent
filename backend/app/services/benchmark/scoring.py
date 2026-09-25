@@ -40,9 +40,12 @@ class Tally:
     def accuracy(self) -> float | None:
         return round(self.correct / self.total, 4) if self.total else None
 
-    def to_dict(self, max_misses: int = 25) -> dict[str, Any]:
+    def to_dict(self, max_misses: int | None = 25) -> dict[str, Any]:
+        """`max_misses=None` keeps every miss — what a payment-history
+        comparison needs, where a single account can miss twenty months and
+        which months they were is the whole finding."""
         return {"correct": self.correct, "total": self.total, "accuracy": self.accuracy,
-                "misses": self.misses[:max_misses]}
+                "misses": self.misses if max_misses is None else self.misses[:max_misses]}
 
 
 @dataclass

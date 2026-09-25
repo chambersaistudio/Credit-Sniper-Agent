@@ -675,3 +675,76 @@ def test_batch_scoring_flags_provenance_that_lost_the_original_page():
     card = score_batch("b2", "A", [account], truth)
     assert card.provenance.accuracy == 0.0
     assert card.pages_wrong == [{"account": "CAINE & WEINER", "expected": [8], "got": [1]}]
+
+def test_payment_history_misses_name_the_account_month_and_both_codes():
+    """Before this, a batch benchmark said "payments 47.8%" and nothing else —
+    useless for comparing two models, where the question is whether they get
+    the SAME months wrong."""
+    from app.services.benchmark.batch_scoring import score_batch
+
+    account = _tradeline(pages=[8], evidence_pages=[], history_pages=[])
+    account.creditor_name = "CREDIT ACCEPTANCE CORP"
+    account.payment_history = [
+        PaymentHistoryEntry(year=2026, month=m, raw_status_code=code, status_code=None,
+                            balance=None, past_due=None, amount_paid=None, amount_due=None,
+                            remarks=[], source_page=8)
+        for m, code in ((3, "OK"), (4, "30"), (5, "OK"))
+    ]
+    truth = [{
+        "creditor_name": "CREDIT ACCEPTANCE CORP", "account_number": "88XXXX2211",
+        "payment_history": {"2026-03": "OK", "2026-04": "60", "2026-05": "OK",
+                            "2026-06": "OK"},
+    }]
+
+    card = score_batch("b0", "A", [account], truth)
+
+    assert (card.payment_history.correct, card.payment_history.total) == (2, 4)
+    assert card.months_expected == 4
+    assert card.months_extracted == 3
+    assert card.months_by_account["CREDIT ACCEPTANCE CORP"] == {
+        "expected": 4, "extracted": 3, "correct": 2,
+    }
+
+    misses = {m["month"]: m for m in card.payment_history.misses}
+    assert sorted(misses) == ["2026-04", "2026-06"]
+    # Read wrong: the model returned a cell, but the wrong code.
+    assert misses["2026-04"]["expected"] == "60"
+    assert misses["2026-04"]["got"] == "30"
+    assert misses["2026-04"]["missing"] is False
+    # Not read at all: a different failure, and distinguishable.
+    assert misses["2026-06"]["expected"] == "OK"
+    assert misses["2026-06"]["got"] is None
+    assert misses["2026-06"]["missing"] is True
+
+
+def test_every_payment_history_miss_survives_into_the_json():
+    """Two years of grid across four accounts can exceed the default cap that
+    field misses use; truncating them would lose the comparison."""
+    from app.services.benchmark.batch_scoring import score_batch
+
+    account = _tradeline(pages=[8], evidence_pages=[], history_pages=[])
+    account.creditor_name = "ATLAS"
+    account.payment_history = []
+    truth = [{"creditor_name": "ATLAS", "account_number": "88XXXX2211",
+              "payment_history": {f"2025-{m:02d}": "OK" for m in range(1, 13)}
+                                 | {f"2026-{m:02d}": "OK" for m in range(1, 13)}}]
+
+    card = score_batch("b0", "A", [account], truth)
+    assert card.payment_history.total == 24
+    assert len(card.payment_history.misses) == 24
+
+    payload = card.to_dict()["payment_history"]
+    assert len(payload["misses"]) == 24, "payment-history misses must not be capped"
+    assert payload["by_account"]["ATLAS"]["extracted"] == 0
+    assert all(m["missing"] is True for m in payload["misses"])
+
+
+def test_field_misses_stay_capped_so_one_bad_account_cannot_flood_the_report():
+    from app.services.benchmark.scoring import Tally
+
+    tally = Tally()
+    for i in range(40):
+        tally.record(False, {"field": f"f{i}"})
+    assert len(tally.to_dict()["misses"]) == 25
+    assert len(tally.to_dict(max_misses=None)["misses"]) == 40
+

@@ -32,8 +32,10 @@ COMMANDS = ("index_pass", "extract_batch", "batch_benchmark")
 
 
 # ── The real Experian plan ──────────────────────────────────────────────
-# 15 tradelines across pages 3–17 of a 31-page report, as the production
-# index actually banked them.
+# 15 tradelines across pages 3–17 of a 28-page report, as the production
+# index actually banked them. The page count is the banked index's own
+# total_pages, confirmed against a deterministic pypdf count of the stored
+# original.
 PRODUCTION_PAGES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
 
 
@@ -47,7 +49,7 @@ def production_index() -> ReportIndex:
                              source_pages=[page], heading_excerpt=None)
             for i, page in enumerate(PRODUCTION_PAGES, start=1)
         ],
-        total_pages=31, unreadable_pages=[],
+        total_pages=28, unreadable_pages=[],
     )
 
 
@@ -69,7 +71,7 @@ def test_the_real_experian_plan_matches_what_production_banked():
 
 
 def test_the_documented_page_send_saving_is_what_the_code_produces():
-    """23 page-sends against 124, an 81.5% reduction — the figures in
+    """23 page-sends against 112, a 79.5% reduction — the figures in
     docs/extraction-scaling.md."""
     index = production_index()
     plans = plan_batches(index)
@@ -77,19 +79,21 @@ def test_the_documented_page_send_saving_is_what_the_code_produces():
 
     assert [len(p.pages) for p in plans] == [6, 6, 6, 5]
     assert summary["pages_sent"] == 23
-    assert summary["pages_if_whole_document"] == 31 * 4 == 124
-    assert summary["pages_saved"] == 101
+    assert summary["pages_if_whole_document"] == 28 * 4 == 112
+    assert summary["pages_saved"] == 89
     reduction = summary["pages_saved"] / summary["pages_if_whole_document"]
-    assert round(reduction * 100, 1) == 81.5
+    assert round(reduction * 100, 1) == 79.5
 
 
 def test_the_documentation_quotes_those_same_numbers():
-    """Cheap, and it would have caught the stale 19/85% figures."""
+    """Cheap, and it would have caught both earlier stale sets: 19/85% from a
+    mock index, then 124/81.5% from a wrong page count."""
     doc = (REPO / "docs" / "extraction-scaling.md").read_text()
     assert "23 page-sends" in doc
-    assert "81.5%" in doc
-    assert "124 page-sends" in doc
-    assert "19 page-sends" not in doc, "the stale mock-derived figure is back"
+    assert "79.5%" in doc
+    assert "112 page-sends" in doc
+    for stale in ("19 page-sends", "85% less", "124 page-sends", "81.5%"):
+        assert stale not in doc, f"the stale figure {stale!r} is back"
 
 
 # ── Where the commands live ─────────────────────────────────────────────

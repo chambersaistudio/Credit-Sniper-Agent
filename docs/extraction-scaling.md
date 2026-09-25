@@ -102,7 +102,7 @@ leaving ample room for reasoning, without multiplying the call count.
 PDF containing only the pages the Stage-1 index placed its tradelines on,
 plus one neighbouring page either side as a safety margin.
 
-Measured on the real banked Experian index (31 pages, 15 tradelines):
+Measured on the real banked Experian index (28 pages, 15 tradelines):
 
 | Batch | Indexed pages | Bundle | Padding | Page-sends |
 |---|---|---|---|---|
@@ -112,8 +112,8 @@ Measured on the real banked Experian index (31 pages, 15 tradelines):
 | b3 | 15, 16, 17 | 14–18 | 14, 18 | 5 |
 | | | | **total** | **23** |
 
-Against 31 pages × 4 batches = 124 page-sends if each batch re-sent the whole
-report, that is **101 fewer — an 81.5% reduction**.
+Against 28 pages × 4 batches = 112 page-sends if each batch re-sent the whole
+report, that is **89 fewer — a 79.5% reduction**.
 
 ### Stage 3 — merge (deterministic, no model)
 
@@ -273,6 +273,30 @@ Ground truth can be a file (`--truth batch0.json`), stdin (`--truth -`) or a
 literal string (`--truth-inline '<json>'`), the last being the practical one
 inside a container.
 
+Record each field as the document prints it, in full. Bureaus put several
+clauses in one field — Experian's Status reads "Voluntarily surrendered.
+$7,684 past due as of Sep 2026." — and a truth file holding only the first
+clause scores a correct extraction as a miss. Field comparison is exact on
+purpose: accepting a superset would also accept a model that invented the
+extra text.
+
+### Payment-history detail
+
+An accuracy percentage cannot tell two models apart, so the report names every
+month that disagreed:
+
+    payment history: 32/48 month(s) correct (66.7%)
+      months expected 48, months extracted 44
+      CREDIT ACCEPTANCE CORP    expected  12, extracted  11, correct   8   (4 wrong)
+      misses:
+        CREDIT ACCEPTANCE CORP  2026-03  expected `OK`  got `30`
+        CREDIT ACCEPTANCE CORP  2026-12  expected `OK`  got MISSING
+
+A month read wrong and a month never returned are different failures calling
+for different fixes, so they are distinguished rather than both counted as
+"incorrect". Every miss also reaches the `--json` output uncapped, which is
+what makes "did Luna and Terra get the SAME cells wrong?" answerable.
+
 ## Sequencing
 
 1. **Land the failure taxonomy** (done) so a truncation is never again
@@ -297,7 +321,7 @@ The failed run billed ~94,300 input + 32,000 output tokens for nothing.
 Two things changed the arithmetic since that was written. The Stage-1 index at
 `detail=low` cost 12,486 input tokens — far less than the estimate, because
 low-detail rendering is dramatically cheaper per page. And batches no longer
-re-send the whole document: 23 page-sends instead of 124, an 81.5% reduction.
+re-send the whole document: 23 page-sends instead of 112, a 79.5% reduction.
 
 So the earlier caveat — "batching probably costs more on a successful
 extraction" — no longer obviously holds, and should not be assumed either way

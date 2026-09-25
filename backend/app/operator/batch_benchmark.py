@@ -32,6 +32,13 @@ Ground truth is a JSON file holding the accounts for THIS batch only:
 Only the fields a truth file states are scored, so it can start with what
 matters and grow. No consumer identity belongs in it.
 
+Record each field as the document PRINTS it, in full. Bureaus put more than
+one clause in a single field — Experian's Status reads "Voluntarily
+surrendered. $7,684 past due as of Sep 2026." — and a truth file holding only
+the first clause scores a correct extraction as a miss. Comparison is exact by
+design: loosening it to accept a superset would also accept a model that
+invented the extra text.
+
 Inside the deployed image, where writing a file is awkward, pass the same
 JSON with --truth-inline '<json>' or pipe it in with --truth -.
 """
@@ -67,6 +74,37 @@ class _Collector:
 
 def _pct(tally) -> str:
     return "—" if tally.accuracy is None else f"{tally.accuracy * 100:.1f}%"
+
+
+def _print_payment_detail(card) -> None:
+    """Which months a model read wrong, by account and by month.
+
+    A payment-history percentage on its own says a model is worse without
+    saying where, and comparing two models needs the months themselves — the
+    interesting answer is whether they disagree about the SAME cells."""
+    tally = card.payment_history
+    if not tally.total and not card.months_extracted:
+        return
+
+    print(f"    payment history: {tally.correct}/{tally.total} month(s) correct"
+          + (f" ({tally.accuracy * 100:.1f}%)" if tally.accuracy is not None else ""))
+    print(f"      months expected {card.months_expected}, "
+          f"months extracted {card.months_extracted}")
+    for account, counts in sorted(card.months_by_account.items()):
+        shortfall = counts["expected"] - counts["correct"]
+        print(f"      {account[:30]:<30} expected {counts['expected']:>3}, "
+              f"extracted {counts['extracted']:>3}, correct {counts['correct']:>3}"
+              + (f"   ({shortfall} wrong)" if shortfall else ""))
+
+    if not tally.misses:
+        return
+    print("      misses:")
+    for miss in tally.misses:
+        # A month with no cell at all is a different failure from a month read
+        # wrong, and the two call for different fixes.
+        got = "MISSING" if miss.get("missing") else f"`{miss['got']}`"
+        print(f"        {miss['account'][:28]:<28} {miss['month']}  "
+              f"expected `{miss['expected']}`  got {got}")
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -187,12 +225,13 @@ async def main(argv: list[str] | None = None) -> int:
         if not card.gate_ok:
             for reason in card.gate_reasons:
                 print(f"    gate: {reason}")
-        for miss in card.fields.misses[:12]:
-            print(f"    {miss['account']} · {miss['field']}: "
+        for miss in card.fields.misses:
+            print(f"    field · {miss['account']} · {miss['field']}: "
                   f"expected `{miss['expected']}`, got `{miss['got']}`")
         for wrong in card.pages_wrong:
-            print(f"    {wrong['account']} · pages: expected {wrong['expected']}, "
+            print(f"    pages · {wrong['account']}: expected {wrong['expected']}, "
                   f"got {wrong['got']}")
+        _print_payment_detail(card)
 
     async with async_session_maker() as db:
         after = await db.get(CreditReport, args.report)

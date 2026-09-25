@@ -30,6 +30,10 @@ class BatchScorecard:
     payment_history: Tally = field(default_factory=Tally)
     months_expected: int = 0
     months_extracted: int = 0
+    # Per account: how many months the truth records, how many the model
+    # returned, and how many agreed. An overall percentage hides whether one
+    # account was misread or every account lost the same month.
+    months_by_account: dict[str, dict[str, int]] = field(default_factory=dict)
     provenance: Tally = field(default_factory=Tally)
     pages_wrong: list[dict[str, Any]] = field(default_factory=list)
     gate_ok: bool = False
@@ -44,9 +48,12 @@ class BatchScorecard:
                          "spurious": self.spurious},
             "field_accuracy": self.fields.to_dict(),
             "per_field": self.per_field,
-            "payment_history": {**self.payment_history.to_dict(),
+            # Every payment-history miss is kept: which months a model read
+            # wrong is the comparison, not a footnote to it.
+            "payment_history": {**self.payment_history.to_dict(max_misses=None),
                                 "months_expected": self.months_expected,
-                                "months_extracted": self.months_extracted},
+                                "months_extracted": self.months_extracted,
+                                "by_account": self.months_by_account},
             "provenance": {**self.provenance.to_dict(), "pages_wrong": self.pages_wrong},
             "gate": {"ok": self.gate_ok, "reasons": self.gate_reasons},
         }
@@ -100,13 +107,26 @@ def score_batch(batch_id: str, config: str, accounts: list, truth_accounts: list
         truth_months = expected.get("payment_history")
         got = {f"{e.year}-{e.month:02d}": e.raw_status_code for e in account.payment_history}
         card.months_extracted += len(got)
+        per_account = card.months_by_account.setdefault(
+            account.creditor_name, {"expected": 0, "extracted": len(got), "correct": 0}
+        )
+        per_account["extracted"] = len(got)
         if isinstance(truth_months, dict):
             card.months_expected += len(truth_months)
-            for month, code in truth_months.items():
+            per_account["expected"] = len(truth_months)
+            for month in sorted(truth_months):
+                code = truth_months[month]
                 ok = normalize_text(got.get(month)) == normalize_text(code)
-                card.payment_history.record(ok, {"account": account.creditor_name,
-                                                 "month": month, "expected": code,
-                                                 "got": got.get(month)})
+                per_account["correct"] += int(ok)
+                card.payment_history.record(ok, {
+                    "account": account.creditor_name,
+                    "month": month,
+                    "expected": code,
+                    # None means the model returned no cell for that month at
+                    # all, which is a different failure from reading it wrong.
+                    "got": got.get(month),
+                    "missing": month not in got,
+                })
 
         # Provenance is scored against ORIGINAL page numbers — the whole point
         # of bundling is that batching must not disturb them.
