@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { ErrorBox, Loading, PageHeader, useAsync } from '../components/ui'
 import {
-  BENCHMARK_CONFIGS, benchmarkRequest, confirmationFor, isJobRunning, jobSummary,
-  paymentByAccount, paymentMisses, pct, usd,
+  BENCHMARK_CONFIGS, DEFAULT_TRUTH_LABEL, benchmarkBlockedReason, benchmarkRequest,
+  confirmationFor, isJobRunning, jobSummary, parseTruthText, paymentByAccount,
+  paymentMisses, pct, shortFingerprint, truthCounts, truthFor, truthStatus, truthToText,
+  usd,
 } from '../lib/operator'
 
 // Internal tooling: reachable by URL, absent from navigation, and it spends
@@ -67,7 +69,7 @@ function ReportDetail({ reportId, onBack }) {
   const checkpoint = useAsync(() => api.operatorCheckpoint(reportId), [reportId])
   const [jobs, setJobs] = useState([])
   const [batchId, setBatchId] = useState('b0')
-  const [truthText, setTruthText] = useState('')
+  const [truths, setTruths] = useState([])
   const [pending, setPending] = useState(null)
   const [error, setError] = useState(null)
 
@@ -79,7 +81,18 @@ function ReportDetail({ reportId, onBack }) {
     }
   }, [reportId])
 
+  // Status only — counts and whether it is verified. The values themselves are
+  // fetched only when someone opens the editor to correct them.
+  const refreshTruths = useCallback(async () => {
+    try {
+      setTruths(await api.operatorTruthList(reportId))
+    } catch (e) {
+      setError(e.message)
+    }
+  }, [reportId])
+
   useEffect(() => { refreshJobs() }, [refreshJobs])
+  useEffect(() => { refreshTruths() }, [refreshTruths])
 
   // While any job is in flight, keep the list fresh without the operator
   // needing to pull to refresh on a phone.
@@ -89,21 +102,18 @@ function ReportDetail({ reportId, onBack }) {
     return () => clearTimeout(timer)
   }, [jobs, refreshJobs])
 
+  const truth = truthFor(truths, batchId)
+  const blocked = benchmarkBlockedReason(truth)
+
+  // The run sends a reference, not the account values: the truth is already
+  // stored server-side and the job records which version it was scored
+  // against, so a correction cannot silently change the question.
   const run = async (config) => {
     setError(null)
-    let truth
     try {
-      truth = JSON.parse(truthText)
-    } catch {
-      setError('Benchmark truth must be valid JSON with an "accounts" array.')
-      return
-    }
-    if (!truth?.accounts?.length) {
-      setError('Benchmark truth needs at least one account.')
-      return
-    }
-    try {
-      await api.queueBenchmark(benchmarkRequest({ reportId, batchId, config, truth }))
+      await api.queueBenchmark(benchmarkRequest({
+        reportId, batchId, config, truthLabel: DEFAULT_TRUTH_LABEL,
+      }))
       setPending(null)
       await refreshJobs()
     } catch (e) {
@@ -152,28 +162,29 @@ function ReportDetail({ reportId, onBack }) {
       )}
 
       {plan.data && (
+        <TruthPanel reportId={reportId} batchId={batchId} summary={truth}
+          banked={Boolean(checkpoint.data?.batches?.[batchId])}
+          onChanged={refreshTruths} />
+      )}
+
+      {plan.data && (
         <div className="card stack">
           <div className="card-title">Benchmark {batchId}</div>
-          <div className="field">
-            <label htmlFor="truth">Ground truth (JSON)</label>
-            <textarea id="truth" rows={5} value={truthText} spellCheck={false}
-              placeholder='{"accounts": [{"creditor_name": "…", "account_number": "…"}]}'
-              onChange={e => setTruthText(e.target.value)} />
-            <span className="hint">
-              Record each field as the document prints it, in full. Never stored in Git.
-            </span>
-          </div>
           <div className="grid-2">
             {BENCHMARK_CONFIGS.map(c => (
-              <button key={c.config} className={`btn btn-sm${c.expensive ? '' : ' btn-primary'}`}
+              <button key={c.config} disabled={Boolean(blocked)}
+                className={`btn btn-sm${c.expensive ? '' : ' btn-primary'}`}
                 onClick={() => setPending(c.config)}>
                 Run {c.label}
               </button>
             ))}
           </div>
-          <p className="tiny muted">
-            One paid model call per run. Nothing is banked and no production default changes.
-          </p>
+          {blocked
+            ? <p className="tiny muted">{blocked}</p>
+            : <p className="tiny muted">
+                Scored against the stored truth ({shortFingerprint(truth)}). One paid model
+                call per run. Nothing is banked and no production default changes.
+              </p>}
         </div>
       )}
 
@@ -191,6 +202,169 @@ function ReportDetail({ reportId, onBack }) {
     </div>
   )
 }
+
+/**
+ * Benchmark truth for one batch: stored once, corrected in place, referenced
+ * by every run.
+ *
+ * The point of this panel is that nobody types account data twice. Truth is
+ * either drafted from the banked extraction and corrected, or entered once;
+ * after that, running Luna and then Terra is two taps, not two pastes.
+ *
+ * Verification is a separate act from saving, and the benchmark requires it. A
+ * draft prefilled from a model's own extraction reads exactly like truth and
+ * is not: scoring that model against it would measure self-consistency.
+ */
+function TruthPanel({ reportId, batchId, summary, banked, onChanged }) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const status = truthStatus(summary)
+
+  // A new batch selection is a different truth; never carry an open editor
+  // (and its values) across.
+  useEffect(() => {
+    setEditing(false)
+    setText('')
+    setError(null)
+  }, [batchId, reportId])
+
+  const act = async (fn) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await fn()
+      await onChanged()
+      return result
+    } catch (e) {
+      setError(e.message)
+      return null
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openEditor = async () => {
+    if (!summary) {
+      setText(TRUTH_TEMPLATE)
+      setEditing(true)
+      return
+    }
+    const stored = await act(() => api.operatorTruth(reportId, batchId, summary.label))
+    if (stored) {
+      setText(truthToText(stored))
+      setEditing(true)
+    }
+  }
+
+  const draft = async () => {
+    const drafted = await act(() => api.draftOperatorTruth(reportId, batchId))
+    if (drafted) {
+      setText(truthToText(drafted))
+      setEditing(true)
+    }
+  }
+
+  const save = async () => {
+    const parsed = parseTruthText(text)
+    if (parsed.error) {
+      setError(parsed.error)
+      return
+    }
+    // Saved unverified on purpose: confirming the values is the next,
+    // deliberate step, and a correction invalidates the old confirmation.
+    const saved = await act(() => api.saveOperatorTruth(reportId, batchId, {
+      accounts: parsed.accounts, label: DEFAULT_TRUTH_LABEL, verified: false,
+    }))
+    if (saved) {
+      setEditing(false)
+      setText('')
+    }
+  }
+
+  return (
+    <div className="card stack">
+      <div className="row-between">
+        <div className="card-title">Truth for {batchId}</div>
+        <span className={`badge ${status.tone}`}>{status.label}</span>
+      </div>
+
+      <div className="small muted">
+        {summary
+          ? <>{truthCounts(summary)} · {shortFingerprint(summary)}</>
+          : 'Nothing stored for this batch yet.'}
+      </div>
+      <p className="tiny muted" style={{ margin: 0 }}>{status.detail}</p>
+      {summary?.note && <p className="tiny muted" style={{ margin: 0 }}>{summary.note}</p>}
+
+      {error && <div className="alert alert-error">{error}</div>}
+
+      {!editing ? (
+        <div className="grid-2">
+          <button className="btn btn-sm" disabled={busy} onClick={openEditor}>
+            {summary ? 'Review & correct' : 'Enter truth'}
+          </button>
+          {banked && !summary && (
+            <button className="btn btn-sm" disabled={busy} onClick={draft}>
+              Draft from banked
+            </button>
+          )}
+          {summary && !summary.verified && (
+            <button className="btn btn-sm btn-primary" disabled={busy}
+              onClick={() => act(() => api.verifyOperatorTruth(reportId, batchId, true,
+                                                              summary.label))}>
+              Verify
+            </button>
+          )}
+          {summary?.verified && (
+            <button className="btn btn-sm btn-ghost" disabled={busy}
+              onClick={() => act(() => api.verifyOperatorTruth(reportId, batchId, false,
+                                                              summary.label))}>
+              Un-verify
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="stack">
+          <div className="field">
+            <label htmlFor="truth-editor">Values as the document prints them</label>
+            <textarea id="truth-editor" rows={12} value={text} spellCheck={false}
+              autoCapitalize="none" autoCorrect="off"
+              onChange={e => setText(e.target.value)} />
+            <span className="hint">
+              Each field in full — Experian prints "Voluntarily surrendered. $7,684 past due
+              as of Sep 2026." and half of that scores a correct read as a miss. Saved
+              server-side only; never committed to Git.
+            </span>
+          </div>
+          <div className="grid-2">
+            <button className="btn btn-sm" disabled={busy}
+              onClick={() => { setEditing(false); setText(''); setError(null) }}>
+              Cancel
+            </button>
+            <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>
+              Save (unverified)
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// The shape to fill in, for a batch with nothing banked to draft from.
+const TRUTH_TEMPLATE = `{
+  "accounts": [
+    {
+      "creditor_name": "",
+      "account_number": "",
+      "status_raw": "",
+      "balance": "",
+      "payment_history": { "2026-08": "" }
+    }
+  ]
+}`
 
 function CheckpointSummary({ checkpoint }) {
   const index = checkpoint.index

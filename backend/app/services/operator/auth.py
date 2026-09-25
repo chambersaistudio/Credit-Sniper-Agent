@@ -5,7 +5,9 @@ Two principals, one surface:
 
   agent  a machine credential (OPERATOR_AGENT_TOKEN) held by the review/QA
          agent. It exists so production testing can happen without a shell.
-  admin  a signed-in user, for the mobile operator page.
+  admin  a signed-in user on the OPERATOR_ADMIN_EMAILS allowlist, for the
+         mobile operator page. Signed in is not enough: this surface spends
+         money and reads every report's telemetry, not only the caller's own.
 
 The credential is narrow by construction rather than by convention. It is
 accepted only by routes under /api/operator/*, and those routes expose a fixed
@@ -91,6 +93,23 @@ def _is_agent_token(offered: str | None) -> bool:
     return hmac.compare_digest(offered, configured)
 
 
+def _is_operator_admin(user: User) -> bool:
+    """Whether this signed-in user may drive the operator surface.
+
+    Fail-closed while auth is on: an empty allowlist admits nobody rather than
+    everybody, because the alternative is that every account that can sign up
+    can also spend money here. With auth disabled there is exactly one fixed
+    local user and no one to keep out, so the list is not applied — that mode
+    is already documented as dev/test only.
+    """
+    if not settings.auth_enabled:
+        return True
+    allowed = settings.operator_admins
+    if not allowed:
+        return False
+    return (user.email or "").strip().lower() in allowed
+
+
 # ── Rate limiting ───────────────────────────────────────────────────────
 # In-process and per principal. Deliberately simple: this guards a
 # single-instance admin surface against a runaway loop, not a public endpoint
@@ -154,6 +173,13 @@ async def operator_principal(
     try:
         user: User = await current_user(request, db)
     except HTTPException:
+        raise _UNAUTHENTICATED
+    if not _is_operator_admin(user):
+        # Signed in is not the same as operator: this surface spends money and
+        # reads every report's telemetry, not only the caller's own. Same
+        # wording as an unauthenticated request, so the response cannot be used
+        # to enumerate who is on the list.
+        logger.warning("Operator access refused for user %s (not an operator admin)", user.id)
         raise _UNAUTHENTICATED
     return OperatorPrincipal(kind="admin", label=user.email or "admin", user_id=user.id)
 

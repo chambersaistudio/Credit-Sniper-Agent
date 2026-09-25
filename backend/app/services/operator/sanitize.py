@@ -99,6 +99,11 @@ _SAFE_MESSAGES = {
     "PageSelectionError": "The requested pages could not be assembled from the stored document.",
     "WorkerInterrupted": "The worker was interrupted while this job was running. A paid job is not "
                          "retried automatically; resubmit with a new idempotency key if you want it re-run.",
+    "TruthError": "No benchmark truth is stored for this batch. Save it first.",
+    "TruthUnverified": "The benchmark truth for this batch has not been verified against the "
+                       "document. Confirm it before scoring a model against it.",
+    "TruthChanged": "The stored benchmark truth changed after this job was queued. Queue a new "
+                    "job so the result matches the truth it is scored against.",
 }
 _GENERIC = "The operation failed. See the server log for details."
 

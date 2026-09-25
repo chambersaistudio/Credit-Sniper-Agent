@@ -4,6 +4,7 @@ from app.models.canonical_account import CanonicalAccount, AccountLink
 from app.models.case import Case, CaseEvent, Claim, Evidence
 from app.models.ai_usage import AIUsageLog
 from app.models.operator_job import OperatorJob
+from app.models.benchmark_truth import BenchmarkTruth
 
 __all__ = [
     "User",
@@ -12,4 +13,5 @@ __all__ = [
     "Case", "CaseEvent", "Claim", "Evidence",
     "AIUsageLog",
     "OperatorJob",
+    "BenchmarkTruth",
 ]

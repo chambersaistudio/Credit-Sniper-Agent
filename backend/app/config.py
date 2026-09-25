@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # A label for that credential in audit records, so a job says who ran it
     # without any part of the token appearing anywhere.
     operator_agent_label: str = "agent"
+    # Who may drive the operator surface from a signed-in session, as a
+    # comma-separated list of email addresses. It is an allowlist, not a
+    # secret: the operator surface spends money and reads every report's
+    # telemetry, so "signed in" is not the same as "operator". Empty means no
+    # signed-in user qualifies while auth is on — the deployment is then
+    # reachable only with the machine credential. (With auth disabled there is
+    # one fixed local user and nobody to keep out, so the list is not applied.)
+    operator_admin_emails: str = ""
     # Runs the operator job worker in this process. Off in tests, which drive
     # the queue explicitly.
     operator_worker_enabled: bool = True
@@ -151,6 +159,14 @@ class Settings(BaseSettings):
     @property
     def auth_enabled(self) -> bool:
         return self.auth_mode == "jwt"
+
+    @property
+    def operator_admins(self) -> frozenset[str]:
+        """Lower-cased operator emails, so the comparison is case-insensitive
+        the way email is."""
+        return frozenset(
+            e.strip().lower() for e in self.operator_admin_emails.split(",") if e.strip()
+        )
 
     @property
     def document_extraction_enabled(self) -> bool:

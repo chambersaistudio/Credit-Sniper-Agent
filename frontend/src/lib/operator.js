@@ -41,14 +41,22 @@ export function confirmationFor(letter, batchId) {
   }
 }
 
-/** The request body for a benchmark job. */
-export function benchmarkRequest({ reportId, batchId, config, truth, idempotencyKey }) {
+/**
+ * The request body for a benchmark job.
+ *
+ * Truth travels by REFERENCE: it is stored server-side once and named by
+ * label, so running a second config does not mean re-entering account data on
+ * a phone. Inline `truth` stays supported for the CLI, where a file is the
+ * natural source, but the page never sends it.
+ */
+export function benchmarkRequest({ reportId, batchId, config, truth, truthLabel, idempotencyKey }) {
   const body = {
     report_id: reportId,
     batch_id: batchId,
     config,
-    truth,
   }
+  if (truth) body.truth = truth
+  if (truthLabel) body.truth_label = truthLabel
   if (idempotencyKey) body.idempotency_key = idempotencyKey
   // Only ever set for the config that requires it, and only from an explicit
   // confirmation — never defaulted on.
@@ -100,4 +108,100 @@ export function jobSummary(job) {
   if (!result) return 'Done'
   return `${result.accounts?.matched ?? '?'}/${result.accounts?.asked ?? '?'} matched · `
     + `fields ${pct(result.field_accuracy)} · payments ${pct(result.payment_history)}`
+}
+
+
+// ── Benchmark truth ─────────────────────────────────────────────────────
+
+export const DEFAULT_TRUTH_LABEL = 'current'
+
+/** The stored truth summary for one batch, or null. */
+export function truthFor(summaries, batchId, label = DEFAULT_TRUTH_LABEL) {
+  return (summaries || []).find(t => t.batch_id === batchId && t.label === label) || null
+}
+
+/**
+ * How a batch's truth reads on the page, and whether it can be scored against.
+ *
+ * Three states, not two: absent, present-but-unconfirmed, and confirmed. The
+ * middle one exists because a draft prefilled from a model's own extraction
+ * looks exactly like truth and is not — benchmarking against it would measure
+ * agreement with that model rather than correctness.
+ */
+export function truthStatus(summary) {
+  if (!summary) {
+    return {
+      state: 'missing', tone: 'red', label: 'No truth stored', canBenchmark: false,
+      detail: 'Save the values this batch actually prints before scoring a model against them.',
+    }
+  }
+  const drafted = summary.source === 'drafted_from_batch'
+  if (!summary.verified) {
+    return {
+      state: 'unverified',
+      tone: 'amber',
+      label: drafted ? 'Draft — not verified' : 'Saved — not verified',
+      canBenchmark: false,
+      detail: drafted
+        ? 'Prefilled from the model\'s own extraction. Correct it against the document and '
+          + 'verify it — scoring a model against its own output measures nothing.'
+        : 'Check these values against the document, then verify. A benchmark against '
+          + 'unverified truth is refused.',
+    }
+  }
+  return {
+    state: 'verified', tone: 'green', label: 'Verified', canBenchmark: true,
+    detail: 'Stored once and referenced by every run — nothing to re-enter.',
+  }
+}
+
+/** "4 accounts · 36 months", for the truth panel. */
+export function truthCounts(summary) {
+  if (!summary) return ''
+  const accounts = `${summary.account_count} account${summary.account_count === 1 ? '' : 's'}`
+  return summary.months ? `${accounts} · ${summary.months} months` : accounts
+}
+
+/** The first 8 characters of the fingerprint, which is all that is useful. */
+export function shortFingerprint(summary) {
+  return summary?.fingerprint ? summary.fingerprint.slice(0, 8) : '—'
+}
+
+/**
+ * Why a benchmark button is disabled, or null when it is not.
+ *
+ * The page refuses the run itself rather than letting the request fail: a 409
+ * after a tap on a paid button reads like the money went somewhere.
+ */
+export function benchmarkBlockedReason(summary) {
+  const status = truthStatus(summary)
+  if (status.canBenchmark) return null
+  return status.state === 'missing'
+    ? 'Save and verify this batch\'s truth first.'
+    : 'Verify this batch\'s truth first.'
+}
+
+/** Pretty-print stored truth for correction, so editing is editing, not typing. */
+export function truthToText(truth) {
+  if (!truth) return ''
+  return JSON.stringify({ accounts: truth.accounts || [] }, null, 2)
+}
+
+/** Parse an edited truth document, with a message a person can act on. */
+export function parseTruthText(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { error: 'That is not valid JSON. Check for a trailing comma or a missing quote.' }
+  }
+  const accounts = parsed?.accounts
+  if (!Array.isArray(accounts) || !accounts.length) {
+    return { error: 'Truth needs an "accounts" array with at least one account.' }
+  }
+  const unnamed = accounts.findIndex(a => !String(a?.creditor_name || '').trim())
+  if (unnamed >= 0) {
+    return { error: `Account ${unnamed + 1} has no creditor_name.` }
+  }
+  return { accounts }
 }

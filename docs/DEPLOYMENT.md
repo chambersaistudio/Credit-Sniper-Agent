@@ -133,6 +133,7 @@ endpoint list, auth design and Codex configuration. Environment:
 |---|---|---|
 | `OPERATOR_AGENT_TOKEN` | a long random secret for the review agent; unset disables machine access | for agent access |
 | `OPERATOR_AGENT_LABEL` | `codex` — appears in audit records, not a secret | no |
+| `OPERATOR_ADMIN_EMAILS` | comma-separated emails allowed to drive `/operator` from a signed-in session; unset admits nobody. Not a secret | for the mobile page |
 | `OPERATOR_WORKER_ENABLED` | `true` (default); off leaves operator jobs queued | no |
 | `OPERATOR_WORKER_POLL_SECONDS` | `2` (default) | no |
 | `OPERATOR_RATE_LIMIT_PER_MINUTE` | `60` (default) | no |

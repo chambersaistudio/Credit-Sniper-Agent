@@ -91,6 +91,21 @@ export const api = {
   queueBenchmark: (body) =>
     request('/operator/jobs/benchmark-batch', { method: 'POST', body }),
 
+  // Benchmark truth lives server-side: entered or corrected once, then named
+  // by (batch, label). The listing carries counts and status only, never the
+  // account values, so a report overview holds none of the data it describes.
+  operatorTruthList: (reportId) => request(`/operator/reports/${reportId}/truth`),
+  operatorTruth: (reportId, batchId, label = 'current') =>
+    request(`/operator/reports/${reportId}/batches/${batchId}/truth?label=${encodeURIComponent(label)}`),
+  saveOperatorTruth: (reportId, batchId, body) =>
+    request(`/operator/reports/${reportId}/batches/${batchId}/truth`, { method: 'PUT', body }),
+  verifyOperatorTruth: (reportId, batchId, verified = true, label = 'current') =>
+    request(`/operator/reports/${reportId}/batches/${batchId}/truth/verify`
+      + `?label=${encodeURIComponent(label)}&verified=${verified}`, { method: 'POST' }),
+  draftOperatorTruth: (reportId, batchId, label = 'current') =>
+    request(`/operator/reports/${reportId}/batches/${batchId}/truth/draft`
+      + `?label=${encodeURIComponent(label)}`, { method: 'POST' }),
+
   listCases: () => request('/cases/'),
   getCase: (id) => request(`/cases/${id}`),
   openCase: (claimIds, recipient, furnisher = {}) =>

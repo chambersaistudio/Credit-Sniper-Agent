@@ -491,9 +491,12 @@ async def test_a_benchmark_cannot_exceed_its_model_call_budget(db_ready, operato
     jobs_module._HANDLERS["benchmark_batch"] = greedy
     try:
         async with async_session_maker() as db:
+            # Enqueued directly rather than through the endpoint, so the
+            # inline-truth flag the endpoint sets is supplied here too.
             job, _ = await enqueue(db, operation="benchmark_batch",
                                    request={"report_id": report_id, "batch_id": "b0",
-                                            "config": "A", "truth": B0_TRUTH},
+                                            "config": "A", "truth": B0_TRUTH,
+                                            "truth_inline": True},
                                    requested_by="agent:test", report_id=report_id)
             await db.commit()
             job_id = job.id

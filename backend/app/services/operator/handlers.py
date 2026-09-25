@@ -20,6 +20,8 @@ from app.models.operator_job import OperatorJob
 from app.services.batch_job import batch_plans, extract_batch
 from app.services.benchmark.batch_scoring import score_batch
 from app.services.operator import reads
+from app.services.operator import truth as truth_service
+from app.services.operator.truth import DEFAULT_LABEL
 from app.services.operator.jobs import handler
 from app.services.operator.registry import config_model
 from app.services.storage import get_storage
@@ -48,7 +50,20 @@ async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> 
     report_id = request["report_id"]
     batch_id = request["batch_id"]
     config = request["config"]
-    truth_accounts = (request.get("truth") or {}).get("accounts") or []
+
+    # Truth is resolved from the store at run time and checked against the
+    # fingerprint recorded when the job was queued. A correction made in
+    # between fails the job rather than quietly scoring against different
+    # values than the operator asked for. Inline truth (the CLI path) travels
+    # with the job because there is no stored row to resolve.
+    if request.get("truth_inline"):
+        truth_accounts = (request.get("truth") or {}).get("accounts") or []
+    else:
+        resolved = await truth_service.resolve_for_job(
+            db, report_id, batch_id, request.get("truth_label", DEFAULT_LABEL),
+            expected_fingerprint=request.get("truth_fingerprint"),
+        )
+        truth_accounts = resolved.get("accounts") or []
     if not truth_accounts:
         raise ValueError("benchmark truth must contain at least one account")
 
@@ -88,6 +103,8 @@ async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> 
         "report_id": str(report.id),
         "batch_id": batch_id,
         "config": config,
+        "truth_label": request.get("truth_label", DEFAULT_LABEL),
+        "truth_fingerprint": request.get("truth_fingerprint"),
         "model": result.model,
         "detail": detail,
         "plan": plan.to_dict(),

@@ -46,7 +46,12 @@ Two principals, one surface:
 
 - **agent** — `OPERATOR_AGENT_TOKEN`, held by the review agent. Sent as
   `X-Operator-Token` (preferred) or `Authorization: Bearer`.
-- **admin** — an ordinary signed-in user, for the mobile operator page.
+- **admin** — a signed-in user whose email is on `OPERATOR_ADMIN_EMAILS`, for
+  the mobile operator page. Being signed in is not enough: this surface spends
+  money and reads every report's telemetry, not only the caller's own, so an
+  empty allowlist admits nobody while auth is on. (With `AUTH_MODE=disabled`
+  there is one fixed local user and nobody to keep out, so the list is not
+  applied — that mode is dev/test only either way.)
 
 Properties, each asserted by a test:
 
@@ -154,7 +159,45 @@ a generic message on purpose: an unvetted message is exactly the one likely to
 carry a provider's wording, a file path or part of the request.
 
 Benchmark truth holds real account values, so it is never logged and never
-committed. Seed it through the API.
+committed. Seed it through the API — see below.
+
+## Benchmark truth
+
+Truth is stored server-side once and thereafter selected by reference, keyed by
+`(report, batch, label)` with `label` defaulting to `current`. Running Luna and
+then Terra is two taps, not two pastes: nobody retypes a payment grid on a
+phone, and the values pass through a clipboard and a form once instead of every
+run.
+
+```
+GET    /api/operator/reports/{id}/truth                        # status only
+GET    /api/operator/reports/{id}/batches/{batch}/truth        # the values
+PUT    /api/operator/reports/{id}/batches/{batch}/truth        # store/correct
+POST   /api/operator/reports/{id}/batches/{batch}/truth/verify
+POST   /api/operator/reports/{id}/batches/{batch}/truth/draft
+```
+
+Three rules the store enforces rather than documents:
+
+- **Unverified truth cannot be benchmarked against** (409). `draft` prefills a
+  truth set from a batch's *banked extraction*, which is a head start and not
+  truth: scoring a model against its own output measures agreement with that
+  model rather than correctness, which is worse than no measurement because it
+  looks like one. A draft is stored `verified: false` and the benchmark refuses
+  it until a human has checked it against the document and said so.
+- **Correcting truth resets `verified`**, because the confirmation was of the
+  previous values.
+- **A job runs against the truth it was queued for.** The fingerprint travels
+  with the job; a truth corrected between queueing and running fails the job
+  instead of quietly answering a different question — including under a reused
+  idempotency key.
+
+The report-level listing returns counts, status and fingerprint and **no account
+values**, so a report overview carries none of the data it describes. The job
+row stores the reference and the fingerprint, never a second copy of the values.
+
+Inline `truth` in a benchmark request still works, for the CLI/agent path where
+a file is the natural source. The mobile page never sends it.
 
 ## Railway environment
 
@@ -162,14 +205,21 @@ committed. Seed it through the API.
 |---|---|---|
 | `OPERATOR_AGENT_TOKEN` | a long random secret, e.g. `python -c "import secrets;print('op_'+secrets.token_urlsafe(48))"` | yes, for agent access |
 | `OPERATOR_AGENT_LABEL` | `codex` — appears in audit records, not a secret | no |
+| `OPERATOR_ADMIN_EMAILS` | comma-separated emails allowed to drive `/operator` from a signed-in session. Not a secret | yes, for the mobile page |
 | `OPERATOR_WORKER_ENABLED` | `true` (default). With it off, jobs queue forever | no |
 | `OPERATOR_WORKER_POLL_SECONDS` | `2` (default) | no |
 | `OPERATOR_RATE_LIMIT_PER_MINUTE` | `60` (default) | no |
 | `OPERATOR_PAID_RATE_LIMIT_PER_HOUR` | `30` (default) | no |
 | `OPERATOR_JOB_LEASE_SECONDS` | `900` (default) | no |
 
-Leaving `OPERATOR_AGENT_TOKEN` unset disables machine access entirely; signed-in
-admins still reach the page.
+Leaving `OPERATOR_AGENT_TOKEN` unset disables machine access entirely; the page
+still works for an allowlisted admin. Leaving `OPERATOR_ADMIN_EMAILS` unset does
+the converse: no signed-in session qualifies and the surface is reachable only
+with the machine credential. Both unset means nobody reaches it at all.
+
+`OPERATOR_WORKER_ENABLED` defaults to **true**, so an unset variable leaves the
+worker running. It is not an activation gate — the gates are the two credentials
+above.
 
 With more than one API instance the operator worker runs in each. Claiming is
 safe (`SKIP LOCKED`), so that is correct but unnecessary — run one, or set
@@ -227,7 +277,20 @@ that invented the extra text.
 
 `/operator` in the frontend. No navigation entry — reachable by URL, for
 internal use. Shows recent reports, extraction state, the banked index, the
-batch plan, banked batches and recent jobs; per batch it offers Luna, Terra and
-Sol, each behind an explicit confirmation, with Sol's saying why it is
-different. Results render matched accounts, field/payment/provenance accuracy,
-the gate, tokens, latency, cost and every payment-history miss.
+batch plan, banked batches and recent jobs.
+
+Per batch it shows that batch's truth — whether it exists, how many accounts and
+months it holds, its short fingerprint, and whether it is verified — with
+buttons to draft it from the banked extraction, correct it in place, and verify
+it. The benchmark buttons are disabled until the truth is verified, and say why,
+rather than letting a tap on a paid button come back 409. Once verified, Luna,
+Terra and Sol are each one tap behind an explicit confirmation, with Sol's
+saying why it is different; each run references the stored truth and re-enters
+nothing.
+
+Results render matched accounts, field/payment/provenance accuracy, the gate,
+tokens, latency, cost and every payment-history miss.
+
+Reaching it needs a signed-in session whose email is on
+`OPERATOR_ADMIN_EMAILS`; no machine token is involved, and a browser build never
+contains one.
