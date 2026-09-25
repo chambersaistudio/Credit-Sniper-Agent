@@ -80,6 +80,13 @@ export default function AccountDetail() {
             {data.bureaus_reporting.map(b => <span key={b} className="badge">{bureauName(b)}</span>)}
             {accountBadges(data).map(b => <span key={b.key} className={`badge ${b.tone}`}>{b.text}</span>)}
           </div>
+          {data.match_review && (
+            <div className="alert alert-warn small">
+              <strong>Possible duplicate.</strong> This looks like it could be the same account as another
+              on your profile, but not clearly enough to merge them
+              ({Math.round(data.match_review.confidence * 100)}% match). They're kept separate until you confirm.
+            </div>
+          )}
           <KeyMetrics records={data.records} />
           <Comparison records={data.records} />
           <BureauDetails records={data.records} />

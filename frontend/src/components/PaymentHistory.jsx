@@ -33,7 +33,17 @@ export default function PaymentHistory({ entries, dense = false }) {
                 <th className="ph-year" scope="row">{row.year}</th>
                 {row.months.map((cell, i) => {
                   const info = cell ? codeInfo(cell.key) : null
-                  const label = cell ? `${MONTHS[i]} ${row.year}: ${info.label}` : `${MONTHS[i]} ${row.year}: not reported`
+                  // Per-month money and remarks, where the bureau printed them.
+                  const extra = cell ? [
+                    cell.balance && `balance ${cell.balance}`,
+                    cell.pastDue && `past due ${cell.pastDue}`,
+                    cell.amountPaid && `paid ${cell.amountPaid}`,
+                    cell.amountDue && `due ${cell.amountDue}`,
+                    ...(cell.remarks || []),
+                  ].filter(Boolean).join(' · ') : ''
+                  const label = cell
+                    ? `${MONTHS[i]} ${row.year}: ${info.label}${extra ? ` — ${extra}` : ''}`
+                    : `${MONTHS[i]} ${row.year}: not reported`
                   return (
                     <td key={i}>
                       <span className={`ph-cell ${info ? `ph-${info.tone}` : 'ph-empty'}`} title={label}>

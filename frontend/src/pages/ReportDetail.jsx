@@ -78,8 +78,16 @@ export default function ReportDetail() {
             <div className="list">
               {data.inquiries.map(i => (
                 <div key={i.id} className="card row-between">
-                  <span>{i.creditor_name}</span>
-                  <span className="small muted">{i.inquiry_date || '—'} · {i.inquiry_type}</span>
+                  <span>
+                    {i.creditor_name}
+                    {i.inquiry_category && <span className="small muted"> · {humanize(i.inquiry_category)}</span>}
+                  </span>
+                  <span className="small muted">
+                    {i.inquiry_date || '—'}
+                    {' · '}
+                    {/* Never say "hard" when the document didn't. */}
+                    {i.inquiry_type ? i.inquiry_type : 'type not stated'}
+                  </span>
                 </div>
               ))}
             </div>

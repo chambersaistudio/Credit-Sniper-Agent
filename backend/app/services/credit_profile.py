@@ -123,6 +123,8 @@ def view_to_dict(view: AccountView) -> dict[str, Any]:
         "is_negative": view.is_negative,
         "strongest_severity": view.strongest_severity,
         "records": view.records,
+        # Set when this account closely resembled another but wasn't merged.
+        "match_review": c.match_review,
         "history_count": view.history_count,
         "findings": [f.to_dict() for f in view.findings],
     }

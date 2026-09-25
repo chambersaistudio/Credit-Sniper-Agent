@@ -57,12 +57,24 @@ export const codeInfo = key => CODES[key] || CODES.unknown
 /** Normalize raw entries into {year, month, key, raw} and drop unusable rows. */
 export function normalizeEntries(entries) {
   return (entries || [])
-    .map(e => ({
-      year: Number(e.year),
-      month: Number(e.month),
-      raw: e.raw_code ?? e.code ?? '',
-      key: normalizeCode(e.raw_code ?? e.code),
-    }))
+    .map(e => {
+      // Accepts both the current per-month shape and the earlier
+      // raw_code/code one, so already-stored histories still render.
+      const raw = e.raw_status_code ?? e.status_code ?? e.raw_code ?? e.code ?? ''
+      return {
+        year: Number(e.year),
+        month: Number(e.month),
+        raw,
+        key: normalizeCode(raw),
+        // Per-month detail some bureaus print alongside the status letter.
+        balance: e.balance ?? null,
+        pastDue: e.past_due ?? null,
+        amountPaid: e.amount_paid ?? null,
+        amountDue: e.amount_due ?? null,
+        remarks: e.remarks || [],
+        sourcePage: e.source_page ?? null,
+      }
+    })
     .filter(e => Number.isInteger(e.year) && e.month >= 1 && e.month <= 12)
 }
 

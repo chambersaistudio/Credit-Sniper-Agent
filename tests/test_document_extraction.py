@@ -40,7 +40,9 @@ def tradeline(**kw) -> ExtractedTradeline:
         date_first_delinquency=None, date_last_reported="May 10, 2026", date_last_payment=None,
         remarks="Placed for collection", consumer_dispute=None,
         contact=ContactInfo(name="Caine & Weiner", address="PO Box 1, Woodland Hills CA", phone="800-555-0100"),
-        payment_history=[PaymentHistoryEntry(year=2026, month=4, raw_code="CO", code="charged_off")],
+        payment_history=[PaymentHistoryEntry(year=2026, month=4, raw_status_code="CO", status_code="charged_off",
+                            balance="$1,204", past_due="$1,204", amount_paid=None, amount_due=None,
+                            remarks=["Placed for collection"], source_page=11)],
         source_pages=[11],
         identity_evidence="Account name CAINE & WEINER",
         field_evidence=[FieldEvidence(field="original_creditor", value="PROGRESSIVE", page=11,
@@ -52,11 +54,12 @@ def tradeline(**kw) -> ExtractedTradeline:
 
 def extraction(**kw) -> CreditReportExtraction:
     base = dict(
-        bureau="experian", report_date="Sep 24, 2026", score_type="FICO Score 8", score=580,
+        bureau="experian", report_date="Sep 24, 2026", document_created_date="Sep 24, 2026",
+        consumer_on_file_since=None, score_type="FICO Score 8", score=580,
         summary_metrics=[], accounts=[tradeline()],
         inquiries=[ExtractedInquiry(creditor_name="CAPITAL ONE", inquiry_date="Sep 23, 2026",
                                     inquiry_type="hard", business_type="Bank Credit Cards",
-                                    contact=None, source_pages=[20])],
+                                    inquiry_category="credit_application", contact=None, source_pages=[20])],
         public_records=[], unreadable_pages=[], warnings=[],
     )
     base.update(kw)
@@ -125,7 +128,12 @@ def test_mapping_converts_printed_values_deterministically():
     assert row["account_status"] == "collection"
     assert row["account_status_raw"] == "Collection account"
     assert row["date_last_reported"] == "May 10, 2026"
-    assert row["payment_history"] == [{"year": 2026, "month": 4, "raw_code": "CO", "code": "charged_off"}]
+    # Every per-month field the report printed survives, not just the code.
+    assert row["payment_history"] == [{
+        "year": 2026, "month": 4, "status_code": "charged_off", "raw_status_code": "CO",
+        "balance": "$1,204", "past_due": "$1,204", "amount_paid": None, "amount_due": None,
+        "remarks": ["Placed for collection"], "source_page": 11,
+    }]
     assert row["source_pages"] == [11]
     assert row["field_evidence"][0]["excerpt"] == "Original creditor PROGRESSIVE"
     assert row["contact"]["phone"] == "800-555-0100"
@@ -149,13 +157,17 @@ def test_normalized_status_falls_back_to_the_printed_wording():
 def test_inquiry_rows_skip_blank_names():
     report = extraction(inquiries=[
         ExtractedInquiry(creditor_name="CAPITAL ONE", inquiry_date="Sep 23, 2026", inquiry_type=None,
-                         business_type="Bank Credit Cards", contact=None, source_pages=[20]),
+                         business_type="Bank Credit Cards", inquiry_category=None,
+                         contact=None, source_pages=[20]),
         ExtractedInquiry(creditor_name="   ", inquiry_date=None, inquiry_type=None, business_type=None,
-                         contact=None, source_pages=[]),
+                         inquiry_category=None, contact=None, source_pages=[]),
     ])
     rows = inquiry_rows(report)
+    # No category and no stated type: the type stays null rather than
+    # becoming a hard inquiry the consumer never incurred.
     assert rows == [{"creditor_name": "CAPITAL ONE", "inquiry_date": "Sep 23, 2026",
-                     "inquiry_type": "hard", "business_type": "Bank Credit Cards"}]
+                     "inquiry_type": None, "inquiry_category": None,
+                     "business_type": "Bank Credit Cards"}]
 
 
 # ── Two-pass reconciliation ────────────────────────────────────────────────

@@ -18,7 +18,12 @@ class CreditReport(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     bureau = Column(String, nullable=False)  # equifax | experian | transunion
+    # The date that makes this report recent: the document's own creation
+    # date when it prints one. Never a "file since" style historical date.
     report_date = Column(DateTime(timezone=True))
+    # Bureau metadata: how long the consumer has had a file. Kept apart so
+    # it can never be mistaken for the report date.
+    on_file_since = Column(String)
     pull_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     source = Column(String, default="manual_upload")  # manual_upload | api_pull
     storage_key = Column(String)  # original PDF in document storage (app/services/storage.py)
@@ -104,6 +109,12 @@ class CreditInquiry(Base):
     # The company's industry as the report labels it, e.g. a "Business Type"
     # of "Bank Credit Cards". A different concept from inquiry_type.
     business_type = Column(String)
+    # Why the inquiry happened, from the section it was printed under:
+    # credit_application | promotional | account_review | credit_monitoring |
+    # consumer_request | insurance | employment | collection | other.
+    # Promotional/account-review inquiries are consumer-visible only and
+    # never count toward a hard-inquiry total.
+    inquiry_category = Column(String)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     report = relationship("CreditReport", back_populates="inquiries")

@@ -65,10 +65,24 @@ def report_classification(tradeline: ExtractedTradeline) -> str | None:
 
 
 def payment_history(tradeline: ExtractedTradeline) -> list[dict[str, Any]] | None:
+    """Keep every per-month field the report printed. The monetary and remark
+    columns TransUnion prints are forensic evidence, not decoration — they are
+    stored as written and never dropped for being unfamiliar."""
     if not tradeline.payment_history:
         return None
     return [
-        {"year": e.year, "month": e.month, "raw_code": e.raw_code, "code": e.code}
+        {
+            "year": e.year,
+            "month": e.month,
+            "status_code": e.status_code,
+            "raw_status_code": e.raw_status_code,
+            "balance": e.balance,
+            "past_due": e.past_due,
+            "amount_paid": e.amount_paid,
+            "amount_due": e.amount_due,
+            "remarks": e.remarks or [],
+            "source_page": e.source_page,
+        }
         for e in tradeline.payment_history
     ]
 
@@ -128,16 +142,53 @@ def account_row(tradeline: ExtractedTradeline) -> dict[str, Any]:
     }
 
 
-def _inquiry_type(value: str | None) -> str | None:
-    """Only the inquiry's own classification. Anything else (an industry
-    label that slipped into this field) is discarded rather than stored as a
-    fake inquiry type; hard is the default for a disclosure's inquiry list."""
+INQUIRY_CATEGORIES = {
+    "credit_application", "promotional", "account_review", "credit_monitoring",
+    "consumer_request", "insurance", "employment", "collection", "other",
+}
+# Categories the bureaus themselves describe as consumer-visible only: they
+# do not affect the score and must never be counted as hard inquiries.
+SOFT_CATEGORIES = {"promotional", "account_review", "credit_monitoring", "consumer_request"}
+
+
+def _inquiry_category(value: str | None) -> str | None:
+    lowered = re.sub(r"[^a-z]+", "_", (value or "").strip().lower()).strip("_")
+    if lowered in INQUIRY_CATEGORIES:
+        return lowered
+    if "promotion" in lowered:
+        return "promotional"
+    if "account_review" in lowered or "review" in lowered:
+        return "account_review"
+    if "monitor" in lowered:
+        return "credit_monitoring"
+    if "employ" in lowered:
+        return "employment"
+    if "insur" in lowered:
+        return "insurance"
+    if "collect" in lowered:
+        return "collection"
+    if "consumer" in lowered or "self" in lowered:
+        return "consumer_request"
+    if "applic" in lowered or "credit_check" in lowered:
+        return "credit_application"
+    return lowered or None
+
+
+def _inquiry_type(value: str | None, category: str | None) -> str | None:
+    """hard / soft / null — never inferred from an inquiry merely existing.
+
+    A category the bureau calls non-scoring (promotional, account review,
+    monitoring, the consumer's own request) is soft by definition. Otherwise
+    we only report what the document actually said; unknown stays null rather
+    than becoming a hard inquiry the consumer never incurred."""
+    if category in SOFT_CATEGORIES:
+        return "soft"
     lowered = (value or "").strip().lower()
     if "soft" in lowered:
         return "soft"
     if "hard" in lowered:
         return "hard"
-    return "hard" if not lowered else None
+    return None
 
 
 def inquiry_rows(extraction: CreditReportExtraction) -> list[dict[str, Any]]:
@@ -145,9 +196,10 @@ def inquiry_rows(extraction: CreditReportExtraction) -> list[dict[str, Any]]:
         {
             "creditor_name": inquiry.creditor_name,
             "inquiry_date": inquiry.inquiry_date,
-            # hard/soft only. An industry label like "Bank Credit Cards" is a
-            # business type and is kept in its own field.
-            "inquiry_type": _inquiry_type(inquiry.inquiry_type),
+            # hard/soft/null only. An industry label like "Bank Credit Cards"
+            # is a business type and is kept in its own field.
+            "inquiry_type": _inquiry_type(inquiry.inquiry_type, _inquiry_category(inquiry.inquiry_category)),
+            "inquiry_category": _inquiry_category(inquiry.inquiry_category),
             "business_type": inquiry.business_type,
         }
         for inquiry in extraction.inquiries

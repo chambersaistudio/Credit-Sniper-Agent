@@ -64,7 +64,9 @@ def _tradeline(index, name, original, type_, number, balance) -> ExtractedTradel
         date_last_reported=None,
         date_last_payment=None, remarks="Placed for collection" if collection else None,
         consumer_dispute=None, contact=None,
-        payment_history=[PaymentHistoryEntry(year=2026, month=5, raw_code="OK", code="current")],
+        payment_history=[PaymentHistoryEntry(year=2026, month=5, raw_status_code="OK", status_code="current",
+                                             balance=balance, past_due=None, amount_paid=None,
+                                             amount_due=None, remarks=[], source_page=index + 3)],
         source_pages=[index + 3], identity_evidence=f"Account name {name}",
         field_evidence=[FieldEvidence(field="account_number", value=number, page=index + 3,
                                       excerpt=f"Account number {number}")],
@@ -73,15 +75,17 @@ def _tradeline(index, name, original, type_, number, balance) -> ExtractedTradel
 
 def golden_extraction() -> CreditReportExtraction:
     return CreditReportExtraction(
-        bureau="experian", report_date="Sep 24, 2026", score_type="FICO Score 8", score=580,
+        bureau="experian", report_date="Sep 24, 2026", document_created_date="Sep 24, 2026",
+        consumer_on_file_since=None, score_type="FICO Score 8", score=580,
         summary_metrics=[],
         accounts=[_tradeline(i, *row) for i, row in enumerate(GOLDEN)],
         inquiries=[
             ExtractedInquiry(creditor_name="CAPITAL ONE", inquiry_date="Sep 23, 2026", inquiry_type="hard",
-                             business_type="Bank Credit Cards", contact=None, source_pages=[20]),
+                             business_type="Bank Credit Cards", inquiry_category="credit_application",
+                             contact=None, source_pages=[20]),
             ExtractedInquiry(creditor_name="CREDIT ONE BANK, NATIO", inquiry_date="May 15, 2026",
                              inquiry_type="hard", business_type="Bank Credit Cards",
-                             contact=None, source_pages=[20]),
+                             inquiry_category="credit_application", contact=None, source_pages=[20]),
         ],
         public_records=[], unreadable_pages=[], warnings=[],
     )
@@ -220,7 +224,9 @@ async def test_golden_experian_extraction_is_stored_and_verified(client, documen
     # Provenance survived into the record, ready for the evidence graph.
     assert caine["source_pages"]
     assert caine["field_evidence"][0]["excerpt"].startswith("Account number")
-    assert caine["payment_history"] == [{"year": 2026, "month": 5, "raw_code": "OK", "code": "current"}]
+    assert caine["payment_history"][0]["raw_status_code"] == "OK"
+    assert caine["payment_history"][0]["balance"] == "$1,204"
+    assert caine["payment_history"][0]["source_page"] == 12
 
     inquiries = {i["creditor_name"]: i["inquiry_date"] for i in detail["inquiries"]}
     assert inquiries == {"CAPITAL ONE": "Sep 23, 2026", "CREDIT ONE BANK, NATIO": "May 15, 2026"}
@@ -380,3 +386,76 @@ async def test_section_labels_do_not_become_payment_status(client, document_ai):
     atlas = next(a for a in detail["accounts"] if a["creditor_name"] == "ATLAS")
     assert atlas["report_classification"] == "Exceptional payment history"
     assert atlas["account_status"] == "open"  # still a real status
+
+
+def transunion_extraction() -> CreditReportExtraction:
+    """The same consumer at TransUnion: eleven of the fifteen Experian
+    tradelines, with the bureau's own name spellings and date formats, plus
+    the promotional/account-review inquiries TU discloses as non-scoring."""
+    accounts = []
+    for index, (name, original, type_, number, balance) in enumerate(GOLDEN[:11]):
+        line = _tradeline(index, name, original, type_, number, balance)
+        accounts.append(line.model_copy(update={
+            "creditor_name": f"{name} NA" if not original else name,
+            "date_opened": "12/22/2025",
+        }))
+    return CreditReportExtraction(
+        bureau="transunion", report_date=None, document_created_date="09/24/2026",
+        consumer_on_file_since="01/04/2011", score_type="VantageScore 3.0", score=571,
+        summary_metrics=[], accounts=accounts,
+        inquiries=[
+            ExtractedInquiry(creditor_name="PROMO LENDER", inquiry_date="Aug 1, 2026", inquiry_type=None,
+                             business_type="Bank Credit Cards", inquiry_category="promotional",
+                             contact=None, source_pages=[30]),
+            ExtractedInquiry(creditor_name="REVIEWING BANK", inquiry_date="Jul 1, 2026", inquiry_type=None,
+                             business_type="Bank Credit Cards", inquiry_category="account_review",
+                             contact=None, source_pages=[30]),
+        ],
+        public_records=[], unreadable_pages=[], warnings=[],
+    )
+
+
+async def test_second_bureau_does_not_double_the_profile(client, document_ai):
+    """Experian (15) then TransUnion (11 of the same accounts) must not read
+    as 26 accounts — the live symptom that exposed the matcher."""
+    provider = document_ai()
+    await _upload(client, _pdf(SOURCE_PDF_TEXT))
+
+    provider._extraction = transunion_extraction()
+    second = await _upload(client, _pdf("TRANSUNION disclosure\nDate Created 09/24/2026"))
+    assert second.status_code == 200, second.text
+
+    accounts = (await client.get("/api/accounts/")).json()
+    # The eleven shared accounts merged; only the four Experian-only ones add.
+    assert len(accounts) == 15, [a["creditor_name"] for a in accounts]
+    merged = [a for a in accounts if len(a["bureaus_reporting"]) == 2]
+    assert len(merged) == 11
+    assert all(sorted(a["bureaus_reporting"]) == ["experian", "transunion"] for a in merged)
+
+    dashboard = (await client.get("/api/dashboard")).json()
+    assert dashboard["accounts"]["total"] == 15
+
+
+async def test_transunion_report_date_uses_document_creation_not_file_since(client, document_ai):
+    provider = document_ai()
+    provider._extraction = transunion_extraction()
+    body = (await _upload(client, _pdf("TRANSUNION disclosure\nDate Created 09/24/2026"))).json()
+
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+    # Date Created, not the 2011 "on file since" date.
+    assert detail["report_date"] == "2026-09-24"
+    assert detail["on_file_since"] == "01/04/2011"
+
+
+async def test_promotional_and_account_review_inquiries_are_not_hard(client, document_ai):
+    provider = document_ai()
+    provider._extraction = transunion_extraction()
+    body = (await _upload(client, _pdf("TRANSUNION disclosure\nDate Created 09/24/2026"))).json()
+
+    detail = (await client.get(f"/api/reports/{body['report_id']}")).json()
+    by_name = {i["creditor_name"]: i for i in detail["inquiries"]}
+    assert by_name["PROMO LENDER"]["inquiry_category"] == "promotional"
+    assert by_name["REVIEWING BANK"]["inquiry_category"] == "account_review"
+    # Consumer-visible, non-scoring: never counted as hard inquiries.
+    assert all(i["inquiry_type"] == "soft" for i in detail["inquiries"])
+    assert not any(i["inquiry_type"] == "hard" for i in detail["inquiries"])

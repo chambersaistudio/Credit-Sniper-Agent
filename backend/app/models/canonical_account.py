@@ -29,6 +29,10 @@ class CanonicalAccount(Base):
     creditor_name = Column(String, nullable=False)
     account_type = Column(String)
     account_number_last_four = Column(String(4))
+    # Set when this account was created despite closely resembling another
+    # canonical account: {candidate_canonical_id, confidence, matched_fields}.
+    # An ambiguous match is surfaced for review, never merged silently.
+    match_review = Column(JSON)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(
         DateTime(timezone=True),

@@ -93,6 +93,7 @@ class IngestOutcome:
     credit_score: int | None = None
     score_type: str | None = None
     report_date: str | None = None
+    on_file_since: str | None = None
     reasons: list[str] = dataclass_field(default_factory=list)
     audit: dict[str, Any] | None = None
     public_records: list[dict[str, Any]] | None = None
@@ -151,7 +152,12 @@ async def _ingest_with_document_model(
         bureau=(extraction.bureau or parsed.get("bureau", "unknown") or "unknown").strip().lower(),
         credit_score=extraction.score if extraction.score is None or 300 <= extraction.score <= 850 else None,
         score_type=extraction.score_type,
-        report_date=extraction.report_date or parsed.get("report_date"),
+        # Recency comes from the document's own creation date when it prints
+        # one. A bureau's "on file since" date is historical metadata and is
+        # kept separately — it is not when this report was produced.
+        report_date=(extraction.document_created_date or extraction.report_date
+                     or parsed.get("report_date")),
+        on_file_since=extraction.consumer_on_file_since,
         reasons=reasons,
         audit=result.audit_to_dict(),
         public_records=public_records(extraction),
@@ -277,6 +283,7 @@ async def upload_credit_report(
     report.bureau = chosen_bureau
     report.credit_score = outcome.credit_score
     report.score_type = outcome.score_type
+    report.on_file_since = outcome.on_file_since
     report.report_date = _to_datetime(outcome.report_date)
     report.extraction_status = outcome.status.value
     report.extraction_audit = outcome.audit
@@ -302,7 +309,9 @@ async def upload_credit_report(
             bureau=chosen_bureau,
             creditor_name=inq.get("creditor_name"),
             inquiry_date=inq.get("inquiry_date"),
-            inquiry_type=inq.get("inquiry_type", "hard"),
+            # No default: an inquiry is only hard when the document says so.
+            inquiry_type=inq.get("inquiry_type"),
+            inquiry_category=inq.get("inquiry_category"),
             business_type=inq.get("business_type"),
         )
         for inq in raw_inquiries
@@ -395,7 +404,8 @@ async def get_report(
         ],
         "inquiries": [
             {"id": str(i.id), "creditor_name": i.creditor_name, "inquiry_date": i.inquiry_date,
-             "inquiry_type": i.inquiry_type, "business_type": i.business_type}
+             "inquiry_type": i.inquiry_type, "inquiry_category": i.inquiry_category,
+             "business_type": i.business_type}
             for i in report.inquiries
         ],
         "public_records": report.public_records or [],
@@ -439,6 +449,7 @@ def _report_summary(report: CreditReport) -> dict[str, Any]:
         "bureau": report.bureau,
         "credit_score": report.credit_score,
         "score_type": report.score_type,
+        "on_file_since": report.on_file_since,
         "report_date": report.report_date.date().isoformat() if report.report_date else None,
         "pull_date": report.pull_date.isoformat() if report.pull_date else None,
         "source": report.source,

@@ -46,8 +46,17 @@ actually labels "Last reported"/"Date reported". If only "Balance updated" is pr
 `date_last_reported` null.
   * `payment_status` is the account's own payment standing. A page or section label such as "Potentially \
 negative" or "Exceptional payment history" is a `report_classification`, not a payment status or account status.
-  * For inquiries, `inquiry_type` is hard/soft (only if stated). A "Business Type" such as "Bank Credit Cards" \
-is the company's industry and belongs in `business_type`.
+  * For inquiries, `inquiry_type` is hard/soft and ONLY when the document says which — an inquiry being \
+listed is not evidence that it is hard. `inquiry_category` records why it happened, taken from the section \
+heading: TransUnion's "Promotional Inquiries" and "Account Review Inquiries" sections are `promotional` and \
+`account_review`, which those disclosures describe as visible only to the consumer and not affecting the \
+score, so they are `soft`. A "Business Type" such as "Bank Credit Cards" is the company's industry and \
+belongs in `business_type`.
+  * `document_created_date` is when the document was produced ("Date Created"). \
+`consumer_on_file_since` is how long the bureau has had a file on this consumer — historical metadata, \
+never the date of this report. Keep them apart, and don't put either in the other.
+  * A monthly payment grid may print money and remarks per month as well as a status letter. Capture \
+`balance`, `past_due`, `amount_paid`, `amount_due` and `remarks` for a month whenever they are printed.
 - Include every tradeline in the report, including closed and collection accounts, and do not list the same \
 tradeline twice.
 - For each account record the pages you read it from, a short excerpt proving its identity, and short excerpts \

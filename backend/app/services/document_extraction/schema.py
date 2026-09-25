@@ -34,12 +34,23 @@ class FieldEvidence(BaseModel):
 
 
 class PaymentHistoryEntry(BaseModel):
-    """One cell of the month-by-month payment grid, kept as reported."""
+    """One cell of the month-by-month payment grid, kept as reported.
+
+    Some bureaus (TransUnion especially) print money and remarks per month,
+    not just a status letter. Those are captured too — they are the raw
+    material for later forensic analysis and must not be dropped.
+    """
 
     year: int
     month: int = Field(description="1-12")
-    raw_code: str = Field(description="The code exactly as printed, e.g. 'OK', '30', 'CO', 'ND'")
-    code: str | None = Field(description="Normalized code if obvious, else null")
+    raw_status_code: str = Field(description="The code exactly as printed, e.g. 'OK', '30', 'CO', 'ND'")
+    status_code: str | None = Field(description="Normalized code if obvious, else null")
+    balance: str | None = Field(description="Balance reported for this month, as printed")
+    past_due: str | None = Field(description="Past-due amount reported for this month, as printed")
+    amount_paid: str | None = Field(description="Amount paid in this month, as printed")
+    amount_due: str | None = Field(description="Scheduled amount due for this month, as printed")
+    remarks: list[str] = Field(description="Any remarks printed against this month")
+    source_page: int | None = Field(description="1-based page this month's cell was read from")
 
 
 class ContactInfo(BaseModel):
@@ -112,8 +123,16 @@ class ExtractedInquiry(BaseModel):
     creditor_name: str = Field(description="The company that made the inquiry")
     inquiry_date: str | None
     inquiry_type: str | None = Field(
-        description="The inquiry's own classification: 'hard' or 'soft' only if the document states it, "
-                    "else null. This is NOT the industry/business category of the company."
+        description="'hard' or 'soft', ONLY when the document says which it is (for example by placing the "
+                    "inquiry in a section it describes as affecting, or not affecting, the credit score). "
+                    "Return null when the document doesn't say — never assume an inquiry is hard just "
+                    "because it is listed. This is NOT the company's industry."
+    )
+    inquiry_category: str | None = Field(
+        description="Why the inquiry happened, from the section it is printed under. One of: "
+                    "credit_application, promotional, account_review, credit_monitoring, consumer_request, "
+                    "insurance, employment, collection, other. TransUnion's 'Promotional Inquiries' and "
+                    "'Account Review Inquiries' sections map to promotional and account_review."
     )
     business_type: str | None = Field(
         description="The company's industry as the report labels it, e.g. a 'Business Type' of "
@@ -139,7 +158,18 @@ class SummaryMetric(BaseModel):
 
 class CreditReportExtraction(BaseModel):
     bureau: str | None = Field(description="equifax, experian or transunion")
-    report_date: str | None
+    report_date: str | None = Field(
+        description="The date this disclosure covers, if the document labels one distinctly from its "
+                    "creation date. Leave null if the only date is the creation date."
+    )
+    document_created_date: str | None = Field(
+        description="When this document was produced — a 'Date Created', 'Prepared on' or equivalent. "
+                    "This is what makes the report recent."
+    )
+    consumer_on_file_since: str | None = Field(
+        description="How long the bureau has had a file on the consumer ('on file since', 'file established'). "
+                    "Historical bureau metadata — NOT the date of this report."
+    )
     score_type: str | None = Field(description="e.g. 'FICO Score 8', exactly as labelled")
     score: int | None
     summary_metrics: list[SummaryMetric] = Field(description="Only metrics explicitly printed in the report")
