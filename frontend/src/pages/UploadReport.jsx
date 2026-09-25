@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
-import { PageHeader, bureauName } from '../components/ui'
+import { PageHeader, ProcessingCard, bureauName, useReportProcessing } from '../components/ui'
 
 const BUREAUS = [
   ['auto_detect', 'Detect automatically'],
@@ -15,8 +15,21 @@ export default function UploadReport() {
   const [bureau, setBureau] = useState('auto_detect')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  // The upload request only hands back a report id: reading the PDF is a
+  // background job, so we follow it rather than hold a connection open.
+  const [accepted, setAccepted] = useState(null)
   const [result, setResult] = useState(null)
   const input = useRef()
+  const { status, processing, error: pollError } = useReportProcessing(accepted?.report_id, {
+    enabled: Boolean(accepted) && !result,
+  })
+
+  useEffect(() => {
+    if (!accepted || processing || result) return
+    api.getReport(accepted.report_id).then(setResult).catch(e => setError(e.message))
+  }, [accepted, processing, result])
+
+  const reset = () => { setAccepted(null); setResult(null); setFile(null); setError(null) }
 
   const choose = f => {
     setError(null)
@@ -32,12 +45,38 @@ export default function UploadReport() {
     setBusy(true)
     setError(null)
     try {
-      setResult(await api.uploadReport(file, bureau))
+      // 202: accepted for processing. Uploading the same file twice resolves
+      // to the same report rather than paying to read it again.
+      setAccepted(await api.uploadReport(file, bureau))
     } catch (e) {
       setError(e.message)
     } finally {
       setBusy(false)
     }
+  }
+
+  if (accepted && !result) {
+    return (
+      <div className="content">
+        <PageHeader title="Reading your report" back="/reports" />
+        <div className="stack">
+          {accepted.duplicate && (
+            <div className="alert alert-warn">
+              You'd already sent us this exact file, so we're showing that report instead of reading it twice.
+            </div>
+          )}
+          <ProcessingCard status={status} processing={processing} />
+          {pollError && (
+            <div className="alert alert-warn">
+              We lost track of the progress here, but your report is still being read.{' '}
+              <Link to={`/reports/${accepted.report_id}`}>Open the report</Link> to check on it.
+            </div>
+          )}
+          {error && <div className="alert alert-error">{error}</div>}
+          <Link to={`/reports/${accepted.report_id}`} className="btn btn-block">See the report</Link>
+        </div>
+      </div>
+    )
   }
 
   if (result) {
@@ -89,7 +128,7 @@ export default function UploadReport() {
               is on hold for this report.
             </div>
           )}
-          {result.warnings.map(w => <div key={w} className="alert alert-warn">{w}</div>)}
+          {(result.warnings || []).map(w => <div key={w} className="alert alert-warn">{w}</div>)}
           <p className="small muted">
             Each account is matched to the same account on your other bureaus' reports. Upload all three to compare them.
           </p>
@@ -97,7 +136,7 @@ export default function UploadReport() {
           <Link to={`/reports/${result.report_id}`} className={`btn btn-block${verified ? '' : ' btn-primary'}`}>
             See exactly what was read
           </Link>
-          <button className="btn btn-ghost btn-block" onClick={() => { setResult(null); setFile(null) }}>Upload another</button>
+          <button className="btn btn-ghost btn-block" onClick={reset}>Upload another</button>
         </div>
       </div>
     )

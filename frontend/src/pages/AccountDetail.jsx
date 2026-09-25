@@ -3,7 +3,9 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import PaymentHistory from '../components/PaymentHistory'
 import { accountBadges, bestHistoryRecord } from '../lib/accountBadges'
-import { accountAgeMonths, formatAge, utilization } from '../lib/paymentHistory'
+import {
+  RECENTLY_REPORTING, accountAgeMonths, formatAge, recentlyReporting, utilization,
+} from '../lib/paymentHistory'
 import {
   ACTION_LABELS, BottomSheet, Empty, ErrorBox, Loading, PageHeader, SeverityBadge, StatusBadge,
   bureauName, fieldLabel, humanize, money, useAsync,
@@ -147,7 +149,9 @@ function KeyMetrics({ records }) {
   const used = utilization(primary)
   const age = formatAge(accountAgeMonths(primary.date_opened))
   const pastDue = Number(primary.past_due_amount)
-  const reporting = records.some(r => has(r.balance_updated_date) || has(r.date_last_reported))
+  // Measured against the report's own date — an old update is not
+  // "actively reporting".
+  const recency = recentlyReporting(primary, primary.as_of)
 
   const metrics = [
     used !== null && { label: 'Utilization', value: `${used}%`, hint: `${money(primary.balance)} of ${money(primary.credit_limit)}` },
@@ -159,7 +163,12 @@ function KeyMetrics({ records }) {
       label: 'Balance vs original', value: money(primary.balance), hint: `original ${money(primary.original_amount)}`,
     },
     Number.isFinite(pastDue) && pastDue > 0 && { label: 'Past due', value: money(pastDue), tone: 'red' },
-    reporting && { label: 'Actively reporting', value: 'Yes', hint: primary.balance_updated_date || primary.date_last_reported },
+    recency.state !== RECENTLY_REPORTING.UNKNOWN && {
+      label: 'Recently reporting',
+      value: recency.state === RECENTLY_REPORTING.YES ? 'Yes' : 'No',
+      hint: recency.days === null ? recency.asOf
+        : `last updated ${recency.asOf} · ${recency.days} days before this report`,
+    },
   ].filter(Boolean)
 
   if (!metrics.length) return null

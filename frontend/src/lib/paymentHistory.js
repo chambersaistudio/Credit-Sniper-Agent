@@ -190,3 +190,38 @@ export function formatAge(months) {
   if (!years) return `${rest} mo`
   return rest ? `${years} yr ${rest} mo` : `${years} yr`
 }
+
+// ── Reporting recency ───────────────────────────────────────────────────
+// An old "balance updated" date does NOT mean an account is actively
+// reporting: a May 2022 update on a September 2026 report is four years
+// stale. Recency is measured against the report's own date, not today's.
+//
+// Window: a furnisher reporting normally refreshes monthly, so we allow two
+// missed cycles plus slack — 100 days — before an account stops counting as
+// recently reporting. Beyond that it is NO; with no date at all it is UNKNOWN.
+export const RECENCY_WINDOW_DAYS = 100
+
+export const RECENTLY_REPORTING = { YES: 'yes', NO: 'no', UNKNOWN: 'unknown' }
+
+function parseLoose(value) {
+  if (!value) return null
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  const d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/**
+ * Was this record still being refreshed as of the report it came from?
+ * Returns { state, days, asOf } — days is the gap in days, or null.
+ */
+export function recentlyReporting(record, reportDate) {
+  const asOf = record?.balance_updated_date || record?.date_last_reported
+      || record?.date_status_updated || null
+  const updated = parseLoose(asOf)
+  const reference = parseLoose(reportDate) || parseLoose(record?.as_of)
+  if (!updated || !reference) return { state: RECENTLY_REPORTING.UNKNOWN, days: null, asOf }
+  const days = Math.round((reference - updated) / 86400000)
+  // A future-dated update is odd but not stale.
+  const state = days <= RECENCY_WINDOW_DAYS ? RECENTLY_REPORTING.YES : RECENTLY_REPORTING.NO
+  return { state, days, asOf }
+}

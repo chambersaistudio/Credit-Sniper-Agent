@@ -273,6 +273,51 @@ def reconcile(extraction: CreditReportExtraction, audit: AuditReport | None) -> 
     return ExtractionStatus.VERIFIED, []
 
 
+async def run_extractor(
+    document: bytes, *, filename: str = "credit-report.pdf", context: dict[str, Any] | None = None
+) -> tuple[CreditReportExtraction | None, str | None, str | None]:
+    """Pass 1 on its own. Returns (extraction, model, provider_error)."""
+    try:
+        generation = await generate_document(
+            ModelTier.DOCUMENT_EXTRACTION,
+            system=EXTRACTOR_SYSTEM,
+            prompt=_extraction_prompt(),
+            document=document,
+            filename=filename,
+            output_type=CreditReportExtraction,
+            task="extract_report_document",
+            context=context or {},
+            detail=settings.document_extraction_detail,
+        )
+    except AIError as e:
+        logger.warning("Document extraction unavailable (%s): %s", type(e).__name__, e)
+        return None, None, f"{type(e).__name__}: {e}"
+    return generation.output, generation.model, None
+
+
+async def run_auditor(
+    document: bytes, extraction: CreditReportExtraction, *,
+    filename: str = "credit-report.pdf", context: dict[str, Any] | None = None,
+) -> tuple[AuditReport | None, str | None, str | None]:
+    """Pass 2 on its own, so a failed audit never re-runs the extractor."""
+    try:
+        generation = await generate_document(
+            ModelTier.DOCUMENT_AUDIT,
+            system=AUDITOR_SYSTEM,
+            prompt=_audit_prompt(extraction),
+            document=document,
+            filename=filename,
+            output_type=AuditReport,
+            task="audit_report_document",
+            context=context or {},
+            detail=settings.document_extraction_detail,
+        )
+    except AIError as e:
+        logger.warning("Document audit unavailable (%s): %s", type(e).__name__, e)
+        return None, None, f"{type(e).__name__}: {e}"
+    return generation.output, generation.model, None
+
+
 async def extract_document(
     document: bytes, *, filename: str = "credit-report.pdf", context: dict[str, Any] | None = None
 ) -> DocumentExtractionResult:

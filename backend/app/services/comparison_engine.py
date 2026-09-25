@@ -7,6 +7,7 @@ Only the reasoning engine decides whether a finding supports a dispute.
 """
 from typing import Any, Callable
 
+from app.services.account_semantics import AS_AGREED, account_lifecycle, payment_performance
 from app.services.findings import (
     CLOSED_STATUSES,
     NEGATIVE_STATUSES,
@@ -63,24 +64,45 @@ def _compare_balance(records: list[dict[str, Any]]) -> Finding | None:
     return Finding("cross_bureau.balance", "balance", severity, rationale, values)
 
 
+# Standings that cannot coexist with "paid as agreed" on the same account.
+_DEROGATORY_PERFORMANCE = {"late_30", "late_60", "late_90", "late_120",
+                          "charged_off", "collection", "repossession", "foreclosure"}
+
+
 def _compare_account_status(records: list[dict[str, Any]]) -> Finding | None:
-    values = _values(records, "account_status")
-    normalized = {normalize_status(v) for v in values.values()}
-    if len(normalized) < 2:
+    """Compare what the bureaus say about the account's *lifecycle*.
+
+    Only a genuine open-vs-closed disagreement is a contradiction. A payment
+    phrase is not a lifecycle statement: "Pays account as agreed" and "Paid or
+    paying as agreed" describe how a *closed* account was paid, and reading
+    either as open/closed produced a false contradiction on a real report."""
+    values = {r["bureau"]: account_lifecycle(r) for r in records if account_lifecycle(r)}
+    if len(set(values.values())) < 2:
         return None
-    contradiction = bool(normalized & OPEN_STATUSES) and bool(normalized & (CLOSED_STATUSES | NEGATIVE_STATUSES))
-    if contradiction:
-        return Finding(
-            "cross_bureau.account_status", "account_status", Severity.LIKELY_INACCURACY,
-            "One bureau reports this account open/current while another reports it closed, "
-            "charged off, or in collection.",
-            values,
-        )
     return Finding(
-        "cross_bureau.account_status", "account_status", Severity.POTENTIAL_INCONSISTENCY,
-        "Account status differs across bureaus without a clear open/closed contradiction.",
+        "cross_bureau.account_status", "account_status", Severity.LIKELY_INACCURACY,
+        "One bureau reports this account as open while another reports it closed.",
         values,
     )
+
+
+def _compare_account_performance(records: list[dict[str, Any]]) -> Finding | None:
+    """Compare payment standing, on normalized meaning rather than wording."""
+    values = {r["bureau"]: payment_performance(r) for r in records if payment_performance(r)}
+    if len(set(values.values())) < 2:
+        return None
+    severity = (
+        Severity.LIKELY_INACCURACY
+        if {AS_AGREED} & set(values.values()) and set(values.values()) & _DEROGATORY_PERFORMANCE
+        else Severity.POTENTIAL_INCONSISTENCY
+    )
+    rationale = (
+        "One bureau reports this account as paid as agreed while another reports a delinquency, "
+        "charge-off or collection."
+        if severity is Severity.LIKELY_INACCURACY
+        else "Payment standing differs across bureaus. Compare against the month-by-month history."
+    )
+    return Finding("cross_bureau.payment_performance", "payment_status", severity, rationale, values)
 
 
 def _max_date_gap(values: dict[str, Any]) -> int | None:
@@ -123,9 +145,15 @@ def _compare_date_opened(records: list[dict[str, Any]]) -> Finding | None:
 
 
 def _compare_payment_status(records: list[dict[str, Any]]) -> Finding | None:
+    """Raw payment wording, but only when it means something different.
+    Bureaus phrase the same standing differently; _compare_account_performance
+    owns the semantic comparison, so this only fires when the normalized
+    meanings are unknown and the words still disagree."""
     values = _values(records, "payment_status")
     if len({normalize_status(v) for v in values.values()}) < 2:
         return None
+    if len({payment_performance(r) for r in records if payment_performance(r)}) == 1:
+        return None  # same standing, different wording
     return Finding(
         "cross_bureau.payment_status", "payment_status", Severity.POTENTIAL_INCONSISTENCY,
         "Payment status differs across bureaus. Bureau wording for this field varies, so it "
@@ -148,6 +176,7 @@ def _compare_credit_limit(records: list[dict[str, Any]]) -> Finding | None:
 _COMPARATORS: list[Callable[[list[dict[str, Any]]], Finding | None]] = [
     _compare_balance,
     _compare_account_status,
+    _compare_account_performance,
     _compare_dofd,
     _compare_date_opened,
     _compare_payment_status,

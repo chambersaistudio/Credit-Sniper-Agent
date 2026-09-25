@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-from tests.conftest import mark_reports_verified, requires_db
+from tests.conftest import mark_reports_verified, requires_db, upload_and_process
 from tests.test_api_flow import EQUIFAX, _responder
 
 pytestmark = requires_db
@@ -120,12 +120,7 @@ async def test_first_sign_in_provisions_distinct_users(client):
 
 
 async def _upload(client, sub, text=EQUIFAX, bureau="auto_detect"):
-    res = await client.post(
-        "/api/reports/upload",
-        files={"file": ("r.pdf", _pdf(text), "application/pdf")},
-        data={"bureau": bureau},
-        headers=_headers(sub),
-    )
+    res = await upload_and_process(client, _pdf(text), bureau=bureau, headers=_headers(sub))
     assert res.status_code == 200, res.text
     return res.json()
 

@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from app.services.ai import add_usage_listener
 from app.services.ai_extraction import ExtractedAccount, ExtractedInquiry, ExtractedReport
 from app.services.reasoning_engine import ClaimProposalOut
-from tests.conftest import mark_reports_verified, requires_db
+from tests.conftest import mark_reports_verified, requires_db, upload_and_process
 
 pytestmark = requires_db
 
@@ -139,9 +139,9 @@ async def client(db_ready, ai):
 
 
 async def _upload(client, text, bureau="auto_detect"):
-    response = await client.post(
-        "/api/reports/upload", files={"file": ("r.pdf", _pdf(text), "application/pdf")}, data={"bureau": bureau},
-    )
+    """Upload and let the background job finish. Upload itself only returns
+    202 + a report id; extraction is a durable job, not part of the request."""
+    response = await upload_and_process(client, _pdf(text), bureau=bureau)
     assert response.status_code == 200, response.text
     return response.json()
 

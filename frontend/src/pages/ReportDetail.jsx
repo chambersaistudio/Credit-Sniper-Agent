@@ -2,7 +2,10 @@ import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api } from '../api'
 import PaymentHistory from '../components/PaymentHistory'
-import { ErrorBox, Loading, PageHeader, bureauName, humanize, money, shortDate, useAsync } from '../components/ui'
+import {
+  ErrorBox, Loading, PageHeader, ProcessingCard, bureauName, humanize, money, shortDate, useAsync,
+  useReportProcessing,
+} from '../components/ui'
 
 const MONEY = new Set(['balance', 'past_due_amount', 'high_balance', 'credit_limit', 'original_amount', 'monthly_payment'])
 // Rendered on their own, not as plain rows.
@@ -26,6 +29,13 @@ const STATUS = {
 export default function ReportDetail() {
   const { id } = useParams()
   const { data, error, loading, reload } = useAsync(() => api.getReport(id), [id])
+  // While the background job is still reading this report, follow it and
+  // reload once it lands — rather than showing an empty report as if it were
+  // the finished answer.
+  const { status, processing } = useReportProcessing(id, {
+    enabled: Boolean(data?.processing),
+    onFinished: reload,
+  })
   const [tone, title, detail] = (data && STATUS[data.extraction_status]) || []
 
   return (
@@ -37,7 +47,12 @@ export default function ReportDetail() {
       />
       {loading && !data && <Loading />}
       {error && <ErrorBox error={error} onRetry={reload} />}
-      {data && (
+      {data?.processing && (
+        <div style={{ marginBottom: 12 }}>
+          <ProcessingCard status={status || data} processing={processing} />
+        </div>
+      )}
+      {data && !data.processing && (
         <>
           {title && (
             <div className={`alert alert-${tone}`} style={{ marginBottom: 12 }}>
@@ -133,6 +148,8 @@ function RetryExtraction({ id, onDone }) {
   const retry = async () => {
     setBusy(true); setFailed(null)
     try {
+      // 202: re-queued. Any pass that already succeeded is reused rather
+      // than paid for twice.
       await api.retryExtraction(id)
       onDone()
     } catch (e) {
@@ -144,7 +161,7 @@ function RetryExtraction({ id, onDone }) {
   return (
     <div style={{ marginTop: 10 }}>
       <button className="btn btn-sm" disabled={busy} onClick={retry}>
-        {busy ? <><span className="spinner" /> Retrying…</> : 'Retry extraction'}
+        {busy ? <><span className="spinner" /> Re-queueing…</> : 'Retry extraction'}
       </button>
       {failed && <div className="small" style={{ marginTop: 6 }}>{failed}</div>}
     </div>

@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+
+import { api } from '../api'
+import { isProcessing, pollDelayMs, pollTimedOut, stageLabel, stageProgress } from '../lib/processing'
 
 export function useAsync(load, deps = []) {
   const [state, setState] = useState({ data: null, error: null, loading: true })
@@ -12,6 +15,78 @@ export function useAsync(load, deps = []) {
   }, deps)
   useEffect(() => { run() }, [run])
   return { ...state, reload: run, setData: data => setState(s => ({ ...s, data })) }
+}
+
+/**
+ * Follow a report's background extraction.
+ *
+ * Reading a credit report is a durable job, not part of the upload request,
+ * so the client polls for its stage. Polling backs off and eventually stops:
+ * the work survives this page either way, so giving up loses nothing.
+ */
+export function useReportProcessing(reportId, { enabled = true, onFinished } = {}) {
+  const [status, setStatus] = useState(null)
+  const [error, setError] = useState(null)
+  const finished = useRef(onFinished)
+  finished.current = onFinished
+
+  useEffect(() => {
+    setStatus(null)
+    setError(null)
+    if (!reportId || !enabled) return undefined
+
+    let cancelled = false
+    let timer = null
+    let attempt = 0
+    const startedAt = Date.now()
+
+    const tick = async () => {
+      try {
+        const next = await api.reportStatus(reportId)
+        if (cancelled) return
+        setStatus(next)
+        if (!isProcessing(next.processing_stage)) {
+          finished.current?.(next)
+          return
+        }
+        if (pollTimedOut(startedAt)) return
+        timer = setTimeout(tick, pollDelayMs(attempt++))
+      } catch (e) {
+        if (!cancelled) setError(e.message)
+      }
+    }
+    tick()
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [reportId, enabled])
+
+  return {
+    status,
+    error,
+    // Unknown yet means still working: never flash a finished state first.
+    processing: status ? isProcessing(status.processing_stage) : Boolean(reportId && enabled),
+  }
+}
+
+/** Live progress for a report still being read. */
+export function ProcessingCard({ status, processing }) {
+  const stage = status?.processing_stage
+  const label = stageLabel(stage) || 'Waiting to be read'
+  return (
+    <div className="card stack" aria-live="polite">
+      <div className="row-between">
+        <div className="card-title">{processing ? label : 'Finished reading'}</div>
+        {processing && <span className="spinner" />}
+      </div>
+      <div className="progress-track" role="progressbar" aria-valuenow={stageProgress(stage)}
+        aria-valuemin={0} aria-valuemax={100} aria-label="Reading progress">
+        <div className="progress-bar" style={{ width: `${stageProgress(stage)}%` }} />
+      </div>
+      <p className="small muted">
+        Your report is stored safely and is being read now. This can take a couple of minutes for a
+        long report — you can leave this page and come back; it keeps going without you.
+      </p>
+    </div>
+  )
 }
 
 export function PageHeader({ title, subtitle, back, actions }) {

@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     document_extraction_detail: str = "high"
     # Run the independent second-pass auditor over the same original PDF.
     document_audit_enabled: bool = True
+    # Run the in-process extraction worker. Extraction is a durable background
+    # job: turning this off leaves uploads queued (useful for tests, or when a
+    # separate worker process drains the queue instead).
+    extraction_worker_enabled: bool = True
+    extraction_worker_poll_seconds: float = 2.0
 
     database_url: str = LOCAL_DATABASE_URL
     # Apply pending migrations when the app boots. Safe with one instance;

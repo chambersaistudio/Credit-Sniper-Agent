@@ -31,7 +31,7 @@ RECORD_FIELDS = (
 # prompt and the set of disputable fields, so adding display-only fields there
 # would change credit reasoning. These ride along on the record for the UI.
 DETAIL_FIELDS = (
-    "sold_to", "account_status_raw", "report_classification", "terms", "responsibility",
+    "sold_to", "account_status_raw", "account_lifecycle", "payment_performance", "report_classification", "terms", "responsibility",
     "consumer_dispute", "balance_updated_date", "date_status_updated",
     "contact", "payment_history", "source_pages", "field_evidence",
 )

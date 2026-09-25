@@ -24,7 +24,7 @@ from app.services.document_extraction.schema import (
     AuditFinding, AuditReport, CreditReportExtraction, ExtractedInquiry, ExtractedTradeline, FieldEvidence,
     PaymentHistoryEntry,
 )
-from tests.conftest import requires_db
+from tests.conftest import drain_extraction_queue, requires_db, upload_and_process
 
 pytestmark = requires_db
 
@@ -165,9 +165,18 @@ async def client(db_ready):
 
 
 async def _upload(client, pdf_bytes):
+    """Upload and drain the extraction queue, returning the finished report.
+
+    The request itself is 202 + a report id: the two document passes happen
+    in a background job that checkpoints each one."""
+    return await upload_and_process(client, pdf_bytes)
+
+
+async def _enqueue_only(client, pdf_bytes, bureau="auto_detect"):
+    """Upload without running the worker — the raw 202 response."""
     return await client.post(
         "/api/reports/upload", files={"file": ("r.pdf", pdf_bytes, "application/pdf")},
-        data={"bureau": "auto_detect"},
+        data={"bureau": bureau},
     )
 
 
@@ -554,9 +563,15 @@ async def test_retry_extraction_uses_the_stored_original(client, document_ai, mo
     # The outage clears; the mocked provider serves normally again.
     restore()
     retried = await client.post(f"/api/reports/{body['report_id']}/retry-extraction")
-    assert retried.status_code == 200, retried.text
-    result = retried.json()
+    # Re-queued, not re-run inline: the consumer isn't made to hold a
+    # connection open while a document model reads a 30-page disclosure.
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["processing_stage"] == "queued"
+    await drain_extraction_queue()
+
+    result = (await client.get(f"/api/reports/{body['report_id']}")).json()
     assert result["extraction_status"] == "verified"
+    assert result["processing_stage"] == "verified"
     assert result["total_accounts"] == 15
 
     # It re-read the same stored bytes rather than asking for the file again.

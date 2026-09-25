@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
-  accountAgeMonths, buildGrid, compactPaymentBadge, normalizeCode, summarize, utilization,
+  accountAgeMonths, buildGrid, compactPaymentBadge, normalizeCode,
+  RECENCY_WINDOW_DAYS, RECENTLY_REPORTING, recentlyReporting, summarize, utilization,
 } from '../src/lib/paymentHistory.js'
 
 const entry = (year, month, raw_code) => ({ year, month, raw_code })
@@ -157,5 +158,67 @@ describe('accountAgeMonths', () => {
     assert.equal(accountAgeMonths('Dec 22, 2025', now), 9)
     assert.equal(accountAgeMonths(null, now), null)
     assert.equal(accountAgeMonths('not a date', now), null)
+  })
+})
+
+
+// ── Reporting recency ───────────────────────────────────────────────────
+// The live bug: a September 2026 Experian report showed "Actively reporting:
+// Yes — May 18, 2022" for an account nobody had refreshed in four years.
+// Recency is measured against the REPORT's date, never today's, and a stale
+// update is NO rather than a quietly reassuring Yes.
+describe('recentlyReporting', () => {
+  const report = '2026-09-24'
+
+  it('does not call a four-year-old update active reporting', () => {
+    const result = recentlyReporting({ balance_updated_date: '2022-05-18' }, report)
+    assert.equal(result.state, RECENTLY_REPORTING.NO)
+    assert.equal(result.days, 1590)
+    assert.equal(result.asOf, '2022-05-18')
+  })
+
+  it('counts a furnisher still refreshing the account', () => {
+    assert.equal(
+      recentlyReporting({ balance_updated_date: '2026-08-31' }, report).state,
+      RECENTLY_REPORTING.YES,
+    )
+  })
+
+  it('uses a deterministic window measured against the report date', () => {
+    const justInside = new Date(Date.UTC(2026, 8, 24) - (RECENCY_WINDOW_DAYS - 1) * 86400000)
+    const justOutside = new Date(Date.UTC(2026, 8, 24) - (RECENCY_WINDOW_DAYS + 1) * 86400000)
+    const iso = d => d.toISOString().slice(0, 10)
+    assert.equal(
+      recentlyReporting({ balance_updated_date: iso(justInside) }, report).state,
+      RECENTLY_REPORTING.YES,
+    )
+    assert.equal(
+      recentlyReporting({ balance_updated_date: iso(justOutside) }, report).state,
+      RECENTLY_REPORTING.NO,
+    )
+  })
+
+  it('is UNKNOWN rather than NO when no date was reported at all', () => {
+    assert.equal(recentlyReporting({}, report).state, RECENTLY_REPORTING.UNKNOWN)
+    assert.equal(recentlyReporting({ balance_updated_date: '2026-08-31' }, null).state,
+      RECENTLY_REPORTING.UNKNOWN)
+    assert.equal(recentlyReporting(null, report).state, RECENTLY_REPORTING.UNKNOWN)
+  })
+
+  it('falls back through the dates a report may print, in order', () => {
+    assert.equal(recentlyReporting({ date_last_reported: '2026-09-01' }, report).asOf, '2026-09-01')
+    assert.equal(recentlyReporting({ date_status_updated: '2026-09-01' }, report).asOf, '2026-09-01')
+    // balance_updated_date wins when several are present.
+    assert.equal(
+      recentlyReporting({ balance_updated_date: '2026-09-10', date_last_reported: '2020-01-01' }, report).asOf,
+      '2026-09-10',
+    )
+  })
+
+  it('treats a future-dated update as current, not stale', () => {
+    assert.equal(
+      recentlyReporting({ balance_updated_date: '2026-10-05' }, report).state,
+      RECENTLY_REPORTING.YES,
+    )
   })
 })

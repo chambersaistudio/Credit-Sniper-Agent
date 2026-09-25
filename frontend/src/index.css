@@ -285,6 +285,11 @@ details[open] > summary::after { content: '▴'; }
 
 .spinner { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--violet-light); animation: spin 0.7s linear infinite; }
 .loading { display: grid; place-items: center; padding: 48px 0; }
+
+/* Background extraction progress. Determinate-ish: it tracks pipeline stages,
+   not a guessed percentage of work. */
+.progress-track { height: 6px; border-radius: 999px; background: var(--border-strong); overflow: hidden; }
+.progress-bar { height: 100%; border-radius: 999px; background: var(--violet-light); transition: width 400ms ease; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {

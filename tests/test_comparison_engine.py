@@ -120,3 +120,84 @@ def test_credit_limit_mismatch_flagged():
         {"bureau": "experian", "credit_limit": 1500.0},
     ]
     assert [f.rule for f in compare_bureau_records(records)] == ["cross_bureau.credit_limit"]
+
+
+# ── Regression: the live Capital One false positive ─────────────────────
+# Clean Equifax and TransUnion disclosures BOTH printed the Capital One
+# account ending 7805 as Closed. Equifax said "Pays account as agreed",
+# TransUnion said "Paid or paying as agreed" — the same statement in
+# different words. Normalizing those onto an open-ish `current` and a
+# closed-ish `paid` produced "one bureau reports this account open while
+# another reports it closed" about an account neither bureau reported open.
+CAPITAL_ONE_7805 = [
+    {
+        "bureau": "equifax",
+        "creditor_name": "CAPITAL ONE",
+        "account_number": "517805XXXXXX7805",
+        "open_closed": "Closed",
+        "account_status_raw": "Pays account as agreed",
+        "account_status": "current",
+        "payment_status": "Pays account as agreed",
+        "balance": 0.0,
+        "date_opened": "03/2019",
+    },
+    {
+        "bureau": "transunion",
+        "creditor_name": "CAPITAL ONE",
+        "account_number": "517805XXXXXX7805",
+        "open_closed": "Closed",
+        "account_status_raw": "Paid or paying as agreed",
+        "account_status": "paid",
+        "payment_status": "Paid or paying as agreed",
+        "balance": 0.0,
+        "date_opened": "03/2019",
+    },
+]
+
+
+def test_capital_one_closed_as_agreed_pair_produces_no_findings():
+    """Both bureaus say Closed and both say the account was paid as agreed.
+    There is nothing here to dispute."""
+    assert compare_bureau_records(CAPITAL_ONE_7805) == []
+
+
+def test_lifecycle_is_never_inferred_from_a_payment_phrase():
+    from app.services.account_semantics import AS_AGREED, CLOSED, account_lifecycle, payment_performance
+
+    equifax, transunion = CAPITAL_ONE_7805
+    # Both are CLOSED, from the report's own open/closed field.
+    assert account_lifecycle(equifax) == account_lifecycle(transunion) == CLOSED
+    # And both wordings mean the same standing.
+    assert payment_performance(equifax) == payment_performance(transunion) == AS_AGREED
+
+
+def test_differing_wording_for_the_same_standing_is_not_a_discrepancy():
+    """'Pays account as agreed' and 'Paid or paying as agreed' differ only in
+    wording, so payment_status must not report a contradiction."""
+    findings = compare_bureau_records([
+        {"bureau": "equifax", "payment_status": "Pays account as agreed"},
+        {"bureau": "transunion", "payment_status": "Paid or paying as agreed"},
+    ])
+    assert [f.field for f in findings] == []
+
+
+def test_as_agreed_against_a_derogatory_standing_is_still_flagged():
+    """Normalizing wording must not blunt a real disagreement: one bureau
+    saying 'as agreed' while another reports a charge-off is exactly the
+    contradiction this engine exists to find."""
+    findings = compare_bureau_records([
+        {"bureau": "equifax", "payment_status": "Pays account as agreed"},
+        {"bureau": "transunion", "payment_status": "Charged off as bad debt"},
+    ])
+    assert any(f.severity == Severity.LIKELY_INACCURACY for f in findings)
+
+
+def test_closed_on_one_bureau_open_on_the_other_is_still_flagged():
+    """The real contradiction the false positive was masquerading as."""
+    findings = compare_bureau_records([
+        {"bureau": "equifax", "open_closed": "Closed", "account_status_raw": "Pays account as agreed"},
+        {"bureau": "transunion", "open_closed": "Open", "account_status_raw": "Paid or paying as agreed"},
+    ])
+    status_finding = next(f for f in findings if f.field == "account_status")
+    assert status_finding.severity == Severity.LIKELY_INACCURACY
+    assert set(status_finding.values.values()) == {"open", "closed"}

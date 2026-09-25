@@ -70,6 +70,7 @@ export const api = {
   },
   listReports: () => request('/reports/'),
   getReport: (id) => request(`/reports/${id}`),
+  reportStatus: (id) => request(`/reports/${id}/status`),
   retryExtraction: (id) => request(`/reports/${id}/retry-extraction`, { method: 'POST' }),
 
   listAccounts: () => request('/accounts/'),

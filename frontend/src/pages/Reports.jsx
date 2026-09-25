@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { accountBadges, needsLook } from '../lib/accountBadges'
@@ -96,6 +96,13 @@ function AccountCard({ account }) {
 
 function Uploads() {
   const { data, error, loading, reload } = useAsync(() => api.listReports(), [])
+  // Reports still being read in the background settle without the user doing
+  // anything, so the list refreshes itself while any of them is in flight.
+  useEffect(() => {
+    if (!data?.some(r => r.processing)) return undefined
+    const timer = setTimeout(reload, 4000)
+    return () => clearTimeout(timer)
+  }, [data, reload])
   if (loading && !data) return <Loading />
   if (error) return <ErrorBox error={error} onRetry={reload} />
   if (!data.length) return <Empty icon="▤" title="No reports uploaded">Upload a PDF from any bureau to get started.</Empty>
@@ -109,7 +116,9 @@ function Uploads() {
           </div>
           <div style={{ textAlign: 'right' }}>
             <div className="card-title">{r.credit_score ?? '—'}</div>
-            {r.extraction_method === 'ai_verified' && <span className="badge amber">AI-read</span>}
+            {r.processing
+              ? <span className="badge amber">Reading…</span>
+              : r.extraction_method === 'ai_verified' && <span className="badge amber">AI-read</span>}
           </div>
         </Link>
       ))}

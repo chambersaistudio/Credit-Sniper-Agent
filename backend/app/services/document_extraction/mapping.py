@@ -9,6 +9,7 @@ produce a balance we didn't derive ourselves from printed text.
 import re
 from typing import Any
 
+from app.services.account_semantics import account_lifecycle, payment_performance
 from app.services.document_extraction.schema import CreditReportExtraction, ExtractedTradeline
 from app.services.pdf_parser import STATUS_MAP
 
@@ -96,6 +97,15 @@ def field_evidence(tradeline: ExtractedTradeline) -> list[dict[str, Any]] | None
     ]
 
 
+def _semantic_record(tradeline: ExtractedTradeline) -> dict[str, Any]:
+    return {
+        "open_closed": tradeline.open_closed,
+        "date_closed": tradeline.date_closed,
+        "account_status_raw": tradeline.status_raw,
+        "payment_status": tradeline.payment_status,
+    }
+
+
 def account_row(tradeline: ExtractedTradeline) -> dict[str, Any]:
     """The CreditAccount column values for one extracted tradeline."""
     contact = tradeline.contact
@@ -108,6 +118,10 @@ def account_row(tradeline: ExtractedTradeline) -> dict[str, Any]:
         "account_status": normalized_status(tradeline),
         "account_status_raw": None if _is_report_classification(tradeline.status_raw) else tradeline.status_raw,
         "payment_status": payment_status(tradeline),
+        # Lifecycle from the report's own open/closed field; standing from
+        # the wording, normalized so bureaus that phrase it differently agree.
+        "account_lifecycle": account_lifecycle(_semantic_record(tradeline)),
+        "payment_performance": payment_performance(_semantic_record(tradeline)),
         "report_classification": report_classification(tradeline),
         "balance": money(tradeline.balance),
         "past_due_amount": money(tradeline.past_due_amount),

@@ -35,6 +35,24 @@ class CreditReport(Base):
     # Only "verified" permits dispute-eligibility analysis.
     extraction_status = Column(String, default="extraction_incomplete", nullable=False)
     extraction_audit = Column(JSON)  # second-pass audit findings and reconciliation reasons
+
+    # ── Durable background processing ───────────────────────────────
+    # Extraction runs outside the HTTP request: an Experian PDF can take
+    # longer than a browser or proxy will hold a connection, and a dropped
+    # connection must never mean a paid-for pass is lost.
+    processing_stage = Column(String, default="queued", nullable=False, index=True)
+    processing_started_at = Column(DateTime(timezone=True))
+    processing_finished_at = Column(DateTime(timezone=True))
+    # Operator-only: the exception class of the last failure. Never returned
+    # by a consumer-facing endpoint.
+    last_processing_error_class = Column(String)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    # SHA-256 of the original PDF: the idempotency key that stops repeated
+    # clicks creating duplicate billable jobs.
+    document_sha256 = Column(String, index=True)
+    # Each expensive pass is checkpointed here, so a failure after the
+    # extractor never pays for a second extraction.
+    extraction_checkpoint = Column(JSON)
     public_records = Column(JSON)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -60,6 +78,11 @@ class CreditAccount(Base):
     account_type = Column(String)
     account_status = Column(String)  # normalized: open | closed | paid | charged_off | collection | ...
     account_status_raw = Column(String)  # status exactly as worded in the report
+    # Two different statements the report makes, kept apart: whether the
+    # account is OPEN/CLOSED, and how it is being paid. A payment phrase
+    # like "Paid or paying as agreed" says nothing about the lifecycle.
+    account_lifecycle = Column(String)   # open | closed
+    payment_performance = Column(String)  # as_agreed | late_30 | charged_off | ...
     payment_status = Column(String)  # the account's own payment standing, as worded
     # The report's section label for this account ("Potentially negative",
     # "Exceptional payment history"). Describes the layout, not the account.
