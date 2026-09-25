@@ -133,15 +133,22 @@ async def upload_credit_report(
 
 
 def _accepted(report: CreditReport, *, duplicate: bool) -> dict[str, Any]:
+    processing = is_in_flight(report)
+    if not processing:
+        message = "You'd already sent us this file, and we've finished reading it."
+    elif duplicate:
+        message = "You'd already sent us this file. We're still reading it — nothing was read twice."
+    else:
+        message = "Your report was received and is being read. This page updates as it progresses."
     return {
         "report_id": str(report.id),
         "processing_stage": report.processing_stage,
-        "processing": is_in_flight(report),
+        "processing": processing,
         # True when these exact bytes were already accepted: the client should
         # follow the same report rather than expect a new one.
         "duplicate": duplicate,
         "status_url": f"/api/reports/{report.id}/status",
-        "message": "Your report was received and is being read. This page updates as it progresses.",
+        "message": message,
     }
 
 

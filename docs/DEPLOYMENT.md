@@ -104,6 +104,31 @@ service's **Settings**:
 | `STORAGE_BACKEND` | `local` for the first smoke test, `r2` once R2 is set up | yes |
 | `ADMIN_TOKEN` | a random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) | optional — enables `POST /api/migrate` |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | from step 3 | only with `STORAGE_BACKEND=r2` |
+| `OPENAI_API_KEY` | your key | for AI-native document extraction |
+| `EXTRACTION_WORKER_ENABLED` | `true` (default). Set `false` only if a separate process drains the queue — with it off, uploads stay queued forever. | no |
+| `EXTRACTION_WORKER_POLL_SECONDS` | `2` (default) | no |
+| `AI_DOCUMENT_EXTRACTION_MODEL` / `AI_DOCUMENT_AUDIT_MODEL` | empty = the pinned defaults. Change only on benchmark evidence (see below). | no |
+| `DOCUMENT_EXTRACTION_DETAIL` | `high` (default) | no |
+
+**Background extraction:** reading a report is a durable job, not part of the
+upload request. `POST /api/reports/upload` returns **202** with a report id and
+`status_url`; the client polls `GET /api/reports/{id}/status`. Each expensive
+pass is checkpointed on the report row, so a restart resumes rather than
+re-paying: a failed audit never re-runs the extractor, and a failed
+persistence re-runs neither model. The queue is Postgres, so the worker is
+safe to restart at any time.
+
+With more than one API instance, the worker runs in each of them and they can
+pick up the same report. Run exactly one instance, or set
+`EXTRACTION_WORKER_ENABLED=false` on all but one.
+
+**Choosing extraction models:** do not change the document tiers by intuition.
+`scripts/benchmark_extraction.py` scores candidate configurations against
+human-confirmed ground truth for real reports and reports quality, latency,
+tokens and cost per report side by side — including what "run the cheap
+config, escalate to Sol only on disagreement or a failed quality gate" would
+actually cost. See `tests/fixtures/benchmark/README.md` for the golden-set
+format; keep real reports and their ground truth out of git.
 
 **Migrations:** each deploy runs `alembic upgrade head` before the new
 container starts; a failed migration stops the deploy. To run one by hand:

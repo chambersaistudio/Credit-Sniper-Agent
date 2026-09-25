@@ -150,12 +150,40 @@ for off in offsets:
 out += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF" % (len(objs) + 1, xref)
 open("/tmp/cs_synthetic.pdf", "wb").write(out)
 PY
+  # Upload is asynchronous: 202 + a report id, then the background worker
+  # reads the document. We poll the status endpoint rather than expect the
+  # upload request itself to have done the work.
   req POST /api/reports/upload "$TOKEN_A" -F "file=@/tmp/cs_synthetic.pdf;type=application/pdf" -F "bureau=auto_detect"; code=$CODE
-  if [ "$code" = "200" ]; then
+  if [ "$code" = "202" ]; then
     REPORT_ID=$(printf '%s' "$BODY" | jget 'd.get("report_id")')
-    acct=$(printf '%s' "$BODY" | jget 'd.get("total_accounts")')
-    ok "upload 200 (report_id $REPORT_ID, accounts=$acct)"
-  else bad "upload -> $code. Body: $BODY"; fi
+    stage=$(printf '%s' "$BODY" | jget 'd.get("processing_stage")')
+    ok "upload 202 accepted (report_id $REPORT_ID, stage=$stage)"
+  else bad "upload -> $code (expected 202). Body: $BODY"; fi
+
+  hdr "10b. Background extraction finishes"
+  if [ -n "$REPORT_ID" ]; then
+    processing=true
+    for _ in $(seq 1 60); do
+      req GET "/api/reports/$REPORT_ID/status" "$TOKEN_A" >/dev/null
+      processing=$(printf '%s' "$BODY" | jget 'str(d.get("processing")).lower()')
+      stage=$(printf '%s' "$BODY" | jget 'd.get("processing_stage")')
+      [ "$processing" = "false" ] && break
+      sleep 2
+    done
+    if [ "$processing" = "false" ]; then
+      req GET "/api/reports/$REPORT_ID" "$TOKEN_A" >/dev/null
+      acct=$(printf '%s' "$BODY" | jget 'len(d.get("accounts") or [])')
+      ok "processing finished (stage=$stage, accounts=$acct)"
+      # The worker must never leave provider internals in a consumer response.
+      if printf '%s' "$BODY" | grep -Eqi 'insufficient_quota|credit_balance_exhausted|AIProviderError|openai'; then
+        bad "report response leaked provider internals"
+      else ok "report response carries no provider internals"; fi
+    else
+      bad "still processing after 120s (stage=$stage) — is EXTRACTION_WORKER_ENABLED set?"
+    fi
+  else
+    skip "no report id — upload failed"
+  fi
 
   hdr "11 & 9 & 12. Retrieve own file / R2 connectivity / object not public"
   if [ -n "$REPORT_ID" ]; then

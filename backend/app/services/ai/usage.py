@@ -4,6 +4,7 @@ failure — emits one UsageRecord to the registered listeners. The app
 registers a DB sink at startup (see app/main.py); tests register none.
 """
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -38,6 +39,24 @@ def add_usage_listener(listener: UsageListener) -> None:
 
 def clear_usage_listeners() -> None:
     _listeners.clear()
+
+
+@contextmanager
+def only_usage_listener(listener: UsageListener):
+    """Route usage records to `listener` alone for the duration of the block,
+    then restore whatever was listening before.
+
+    The benchmark harness uses this: its token and cost numbers are
+    measurements of a candidate configuration and must not be written to the
+    application's usage table as if they were real work."""
+    saved = list(_listeners)
+    _listeners.clear()
+    _listeners.append(listener)
+    try:
+        yield
+    finally:
+        _listeners.clear()
+        _listeners.extend(saved)
 
 
 async def emit(record: UsageRecord) -> None:

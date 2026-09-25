@@ -1,0 +1,296 @@
+{
+  "name": "experian_golden_synthetic",
+  "pdf": "experian_golden.pdf",
+  "bureau": "experian",
+  "report_date": "Sep 24, 2026",
+  "score": 580,
+  "score_type": "FICO Score 8",
+  "accounts": [
+    {
+      "creditor_name": "ATLAS",
+      "original_creditor": null,
+      "account_number": "5299XXXXXXXX1234",
+      "account_type": "Line of Credit",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$16",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        3
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "CAPITAL ONE",
+      "original_creditor": null,
+      "account_number": "517805XXXXXX8842",
+      "account_type": "Credit card",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$842",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        4
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "CREDIT ACCEPTANCE CORP",
+      "original_creditor": null,
+      "account_number": "7788XXXX",
+      "account_type": "Auto Loan",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$12,430",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        5
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "EXTRA",
+      "original_creditor": null,
+      "account_number": "40011XXXXXXX2200",
+      "account_type": "Line of Credit",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$0",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        6
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "MISSION LANE TAB BANK",
+      "original_creditor": null,
+      "account_number": "5178XXXXXXXX9901",
+      "account_type": "Credit card",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$410",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        7
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "NAVY FEDERAL CR UNION",
+      "original_creditor": null,
+      "account_number": "4441XXXXXXXX1020",
+      "account_type": "Credit card",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$2,310",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        8
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "NAVY FEDERAL CR UNION",
+      "original_creditor": null,
+      "account_number": "9002XXXX",
+      "account_type": "Secured loan",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$1,800",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        9
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "SBNASELFLNDR",
+      "original_creditor": null,
+      "account_number": "3301XXXX",
+      "account_type": "Secured loan",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$520",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        10
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "SELF FINANCIAL/LEAD BA",
+      "original_creditor": null,
+      "account_number": "3302XXXX",
+      "account_type": "Line of Credit",
+      "open_closed": "Open",
+      "status_raw": "Open/Never late",
+      "balance": "$0",
+      "credit_limit": "$1,000",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        11
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "CAINE & WEINER",
+      "original_creditor": "PROGRESSIVE",
+      "account_number": "88XXXX2211",
+      "account_type": "Collection",
+      "open_closed": "Open",
+      "status_raw": "Collection account",
+      "balance": "$1,204",
+      "past_due_amount": "$1,204",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        12
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "CREDENCE RESOURCE MANA",
+      "original_creditor": "AT T",
+      "account_number": "77XXXX9310",
+      "account_type": "Collection",
+      "open_closed": "Open",
+      "status_raw": "Collection account",
+      "balance": "$560",
+      "past_due_amount": "$560",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        13
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "CREDIT COLLECTION SERV",
+      "original_creditor": "PROGRESSIVE",
+      "account_number": "66XXXX1188",
+      "account_type": "Collection",
+      "open_closed": "Open",
+      "status_raw": "Collection account",
+      "balance": "$980",
+      "past_due_amount": "$980",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        14
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "JEFFERSON CAPITAL SYST",
+      "original_creditor": "MISSION LANE CREDIT CARD",
+      "account_number": "55XXXX7742",
+      "account_type": "Collection",
+      "open_closed": "Open",
+      "status_raw": "Collection account",
+      "balance": "$1,510",
+      "past_due_amount": "$1,510",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        15
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "JEFFERSON CAPITAL SYST",
+      "original_creditor": "T-MOBILE",
+      "account_number": "55XXXX7743",
+      "account_type": "Collection",
+      "open_closed": "Open",
+      "status_raw": "Collection account",
+      "balance": "$420",
+      "past_due_amount": "$420",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        16
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    },
+    {
+      "creditor_name": "LVNV FUNDING LLC",
+      "original_creditor": "CAPITAL BANK OPEN SKY",
+      "account_number": "44XXXX2001",
+      "account_type": "Collection",
+      "open_closed": "Open",
+      "status_raw": "Collection account",
+      "balance": "$735",
+      "past_due_amount": "$735",
+      "date_opened": "Dec 22, 2025",
+      "balance_updated": "Jun 25, 2026",
+      "source_pages": [
+        17
+      ],
+      "payment_history": {
+        "2026-05": "OK"
+      }
+    }
+  ],
+  "inquiries": [
+    {
+      "creditor_name": "CAPITAL ONE",
+      "inquiry_date": "Sep 23, 2026",
+      "inquiry_type": "hard",
+      "inquiry_category": "credit_application",
+      "business_type": "Bank Credit Cards"
+    },
+    {
+      "creditor_name": "CREDIT ONE BANK, NATIO",
+      "inquiry_date": "May 15, 2026",
+      "inquiry_type": "hard",
+      "inquiry_category": "credit_application",
+      "business_type": "Bank Credit Cards"
+    }
+  ]
+}

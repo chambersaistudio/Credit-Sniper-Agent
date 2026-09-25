@@ -23,7 +23,9 @@ from app.services.ai.providers import (
     get_provider,
     register_provider,
 )
-from app.services.ai.usage import UsageRecord, add_usage_listener, clear_usage_listeners, emit
+from app.services.ai.usage import (
+    UsageRecord, add_usage_listener, clear_usage_listeners, emit, only_usage_listener,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -128,5 +130,6 @@ __all__ = [
     "AIConfigurationError", "AIError", "AIProviderError", "AIRefusalError", "AIResponseError",
     "DocumentUnsupported", "Generation", "ModelTier", "TierConfig", "UsageRecord",
     "add_usage_listener", "clear_usage_listeners", "generate", "generate_document",
+    "only_usage_listener",
     "get_document_provider", "register_provider", "resolve_tier",
 ]
