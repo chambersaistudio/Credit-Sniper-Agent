@@ -157,12 +157,18 @@ class RemapReport:
                 "out_of_range": sorted(set(self.out_of_range))}
 
 
-def remap_tradelines(tradelines: list, bundle: PageBundle) -> RemapReport:
-    """Rewrite every page reference on these tradelines to original pages.
+def remap_tradelines(tradelines: list, bundle: PageBundle,
+                     batch: Any | None = None) -> RemapReport:
+    """Rewrite every page reference to ORIGINAL page numbers.
 
-    Mutates in place and reports what could not be placed. Covers all three
+    Mutates in place and reports what could not be placed. Covers all four
     places a page number appears: the tradeline's own `source_pages`, each
-    `field_evidence` entry, and each month of `payment_history`.
+    `field_evidence` entry, each month of `payment_history`, and — when the
+    batch is supplied — its `unreadable_pages`.
+
+    That last one matters because a failed batch is still written to the
+    checkpoint. Leaving it bundle-relative would store "page 1" for what is
+    really page 6 of the report, and nothing downstream could tell.
     """
     report = RemapReport()
 
@@ -184,4 +190,9 @@ def remap_tradelines(tradelines: list, bundle: PageBundle) -> RemapReport:
             evidence.page = translate(evidence.page)
         for month in tradeline.payment_history or []:
             month.source_page = translate(month.source_page)
+
+    if batch is not None and getattr(batch, "unreadable_pages", None):
+        batch.unreadable_pages = sorted(
+            {p for p in (translate(page) for page in batch.unreadable_pages) if p}
+        )
     return report

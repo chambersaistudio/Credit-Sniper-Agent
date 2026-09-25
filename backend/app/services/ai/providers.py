@@ -62,6 +62,25 @@ class DocumentUnsupported(AIConfigurationError):
     """Raised by providers that can't accept a raw document."""
 
 
+def describe_validation_error(error: ValidationError, limit: int = 6) -> str:
+    """A schema failure in structural terms only.
+
+    Pydantic's own string includes the offending INPUT for each error, and on
+    a credit report that input is the model's rendering of somebody's
+    accounts. That text ends up in a stored failure record and in operator
+    telemetry, so what is kept is the shape of the problem — how many errors,
+    which fields, which rule — and never the value that broke it."""
+    problems = error.errors()
+    parts = []
+    for problem in problems[:limit]:
+        location = ".".join(str(piece) for piece in problem.get("loc", ())) or "<root>"
+        # `msg` is pydantic's own wording for the RULE. `input` is the data,
+        # and is deliberately not read.
+        parts.append(f"{location}: {problem.get('type', 'invalid')}")
+    more = f" (+{len(problems) - limit} more)" if len(problems) > limit else ""
+    return f"{len(problems)} schema error(s) at {'; '.join(parts)}{more}"
+
+
 def _text_format_param(output_type: type[BaseModel]) -> dict:
     """The Responses `text.format` payload for a strict structured output.
 
@@ -139,7 +158,8 @@ class AnthropicProvider:
         try:
             output = output_type.model_validate_json(text)
         except ValidationError as e:
-            raise AIResponseError(f"Model output failed schema validation: {e}") from e
+            raise AIResponseError(
+                f"Model output failed schema validation: {describe_validation_error(e)}") from e
 
         usage = message.usage
         return ProviderResult(
@@ -183,7 +203,8 @@ class OpenAIProvider:
         except self._openai.OpenAIError as e:
             raise AIConfigurationError(f"OpenAI client error: {e}") from e
         except ValidationError as e:
-            raise AIResponseError(f"Model output failed schema validation: {e}") from e
+            raise AIResponseError(
+                f"Model output failed schema validation: {describe_validation_error(e)}") from e
         latency_ms = (time.monotonic() - start) * 1000
 
         message = completion.choices[0].message
@@ -297,7 +318,8 @@ class OpenAIProvider:
         except self._openai.OpenAIError as e:
             raise AIConfigurationError(f"OpenAI client error: {e}") from e
         except ValidationError as e:
-            raise AIResponseError(f"Model output failed schema validation: {e}") from e
+            raise AIResponseError(
+                f"Model output failed schema validation: {describe_validation_error(e)}") from e
         latency_ms = (time.monotonic() - start) * 1000
 
         # Everything below this point was BILLED. Each failure carries the
@@ -334,7 +356,7 @@ class OpenAIProvider:
             # request is, so it goes in the message.
             raise AIResponseError(
                 f"Model output failed schema validation after {len(text):,} chars "
-                f"(max_output_tokens={max_tokens}): {e}",
+                f"(max_output_tokens={max_tokens}): {describe_validation_error(e)}",
                 usage=billed,
             ) from e
 

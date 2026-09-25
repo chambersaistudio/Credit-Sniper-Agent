@@ -64,16 +64,13 @@ async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> 
     banked_before = _banked_digest(report)
     document = await get_storage().get(report.storage_key)
 
-    # Production defaults are restored whatever happens below.
-    saved = (settings.ai_document_extraction_model, settings.document_extraction_detail)
-    try:
-        settings.ai_document_extraction_model = model
-        settings.document_extraction_detail = detail
-        result = await extract_batch(document, plan, context={
-            "operator_job": str(job.id), "benchmark_config": config,
-        })
-    finally:
-        settings.ai_document_extraction_model, settings.document_extraction_detail = saved
+    # The model is an argument, not a global. This runs in the same process as
+    # the consumer extraction worker, so mutating settings — even with a
+    # finally that restores them — would leave a window in which an upload was
+    # read by whichever model a benchmark happened to be testing.
+    result = await extract_batch(document, plan, model=model, detail=detail, context={
+        "operator_job": str(job.id), "benchmark_config": config,
+    })
 
     if result.batch is None:
         failure = result.failure

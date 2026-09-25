@@ -47,6 +47,11 @@ class CreditReport(Base):
     # by a consumer-facing endpoint.
     last_processing_error_class = Column(String)
     attempt_count = Column(Integer, default=0, nullable=False)
+    # When a worker last claimed this report. Distinct from
+    # processing_started_at, which records when processing FIRST began and is
+    # preserved across retries; this one is the lease that stops two workers
+    # paying to read the same document.
+    processing_claimed_at = Column(DateTime(timezone=True), index=True)
     # SHA-256 of the original PDF: the idempotency key that stops repeated
     # clicks creating duplicate billable jobs.
     document_sha256 = Column(String, index=True)

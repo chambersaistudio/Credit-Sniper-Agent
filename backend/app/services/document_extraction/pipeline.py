@@ -416,11 +416,16 @@ def _batch_prompt(manifest: str, page_count: int) -> str:
 async def run_batch_extractor(
     bundle_pdf: bytes, manifest: str, page_count: int, *,
     filename: str = "credit-report-pages.pdf", context: dict[str, Any] | None = None,
+    model: str | None = None, detail: str | None = None,
 ) -> tuple["TradelineBatch | None", str | None, "PassFailure | None"]:
     """Stage 2: read one batch of tradelines from a bundle of their pages.
 
     Returns (batch, model, failure). Page numbers in the result are relative to
-    the bundle; the caller translates them back to original pages."""
+    the bundle; the caller translates them back to original pages.
+
+    `model`/`detail` override the tier for this call alone. A benchmark needs
+    to choose a model without changing what the consumer extraction worker —
+    running in the same process — uses for the next upload."""
     try:
         generation = await generate_document(
             ModelTier.DOCUMENT_EXTRACTION,
@@ -431,7 +436,8 @@ async def run_batch_extractor(
             output_type=TradelineBatch,
             task="extract_tradeline_batch",
             context=context or {},
-            detail=settings.document_extraction_detail,
+            detail=detail or settings.document_extraction_detail,
+            model=model,
         )
     except AIError as e:
         failure = PassFailure.from_error("batch", e)

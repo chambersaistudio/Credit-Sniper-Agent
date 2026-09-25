@@ -27,7 +27,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -105,6 +105,10 @@ def enqueue(report: CreditReport, *, reset_audit: bool = False) -> None:
     report.processing_stage = Stage.QUEUED
     report.processing_finished_at = None
     report.last_processing_error_class = None
+    # Deliberately re-queueing is a fresh claim opportunity. Leaving the old
+    # claim in place would make the report wait out its lease before any
+    # worker could pick it up.
+    report.processing_claimed_at = None
 
 
 async def process_report(report_id, *, session_factory=None) -> str:
@@ -264,17 +268,41 @@ async def _fail(db: AsyncSession, report: CreditReport, error: Exception, reason
     return ExtractionStatus.FAILED.value
 
 
+# One statement, so the claim cannot be split. SKIP LOCKED lets a second
+# worker move to the next report instead of blocking on this one, and the
+# lease means a report whose worker died is picked up again later rather than
+# being stranded — while a live claim keeps a second worker from paying to
+# read the same document.
+_CLAIM = text("""
+    UPDATE credit_reports
+       SET processing_claimed_at = now()
+     WHERE id = (
+           SELECT id FROM credit_reports
+            WHERE processing_stage = ANY(:stages)
+              AND (processing_claimed_at IS NULL
+                   OR processing_claimed_at < now() - make_interval(secs => :lease))
+            ORDER BY created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+     )
+ RETURNING id
+""")
+
+
 async def claim_next(session_factory=None) -> Any | None:
-    """The id of one report still owed work, oldest first."""
+    """Atomically claim one report still owed work, oldest first.
+
+    Claiming and processing used to be separate steps: a plain SELECT, then a
+    read. Two API instances could select the same row and both pay for the
+    same document. The claim is now a single conditional UPDATE."""
     factory = session_factory or async_session_maker
     async with factory() as db:
-        result = await db.execute(
-            select(CreditReport.id)
-            .where(CreditReport.processing_stage.in_(CLAIMABLE_STAGES))
-            .order_by(CreditReport.created_at)
-            .limit(1)
-        )
-        return result.scalars().first()
+        claimed = (await db.execute(_CLAIM, {
+            "stages": list(CLAIMABLE_STAGES),
+            "lease": float(settings.extraction_claim_lease_seconds),
+        })).scalar_one_or_none()
+        await db.commit()
+        return claimed
 
 
 async def worker_loop(poll_seconds: float = 2.0) -> None:

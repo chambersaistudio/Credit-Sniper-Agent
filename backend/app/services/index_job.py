@@ -21,6 +21,7 @@ from app.database import async_session_maker
 from app.models.credit_report import CreditReport
 from app.services.document_extraction.index_quality import IndexQuality, assess_index
 from app.services.document_extraction.index_schema import ReportIndex
+from app.services.document_extraction.page_bundle import page_count
 from app.services.document_extraction.pipeline import run_indexer
 from app.services.storage import get_storage
 
@@ -92,7 +93,15 @@ async def index_document(
 ) -> IndexResult:
     """Run the index pass over PDF bytes. No database involvement."""
     index, model, failure = await run_indexer(document, filename=filename, context=context or {})
-    quality = assess_index(index, expected_tradelines=expected_tradelines)
+    # Counted locally with pypdf. The one fact in the gate that does not
+    # depend on the model being honest about what it read.
+    try:
+        actual_pages = page_count(document)
+    except Exception:  # an unreadable container is the extractor's problem
+        logger.warning("Could not count the pages of the supplied document")
+        actual_pages = None
+    quality = assess_index(index, expected_tradelines=expected_tradelines,
+                           actual_page_count=actual_pages)
     return IndexResult(index, model, failure, quality, banked=False)
 
 

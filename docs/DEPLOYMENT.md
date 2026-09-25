@@ -107,6 +107,7 @@ service's **Settings**:
 | `OPENAI_API_KEY` | your key | for AI-native document extraction |
 | `EXTRACTION_WORKER_ENABLED` | `true` (default). Set `false` only if a separate process drains the queue — with it off, uploads stay queued forever. | no |
 | `EXTRACTION_WORKER_POLL_SECONDS` | `2` (default) | no |
+| `EXTRACTION_CLAIM_LEASE_SECONDS` | `1800` (default). How long a worker's claim on a report is honoured before another may retry it | no |
 | `AI_DOCUMENT_EXTRACTION_MODEL` / `AI_DOCUMENT_AUDIT_MODEL` | empty = the pinned defaults. Change only on benchmark evidence (see below). | no |
 | `DOCUMENT_EXTRACTION_DETAIL` | `high` (default) | no |
 
@@ -118,9 +119,10 @@ re-paying: a failed audit never re-runs the extractor, and a failed
 persistence re-runs neither model. The queue is Postgres, so the worker is
 safe to restart at any time.
 
-With more than one API instance, the worker runs in each of them and they can
-pick up the same report. Run exactly one instance, or set
-`EXTRACTION_WORKER_ENABLED=false` on all but one.
+With more than one API instance the worker runs in each. Claiming is atomic
+(`FOR UPDATE SKIP LOCKED` plus a lease), so two instances cannot pay to read
+the same document — but running one worker is still the simpler operational
+story.
 
 **Operator control plane.** Production QA runs over HTTPS rather than a shell:
 `/api/operator/*` exposes a fixed allowlist of named operations, backed by a

@@ -144,9 +144,14 @@ async def test_truncated_json_is_a_response_failure_that_knows_what_it_cost():
 
     error = caught.value
     # The measurement that says how far over budget the request is.
-    assert "59 chars" in str(error) or "chars" in str(error)
+    assert "chars" in str(error)
     assert "max_output_tokens=32000" in str(error)
-    assert "EOF while parsing" in str(error)
+    # Structural, not pydantic's own string: that one quotes the offending
+    # INPUT, which on a credit report is the model's rendering of somebody's
+    # accounts, and it would land in a stored failure record.
+    assert "schema error(s)" in str(error)
+    assert "json_invalid" in str(error)
+    assert "unterminated strin" not in str(error), "model output leaked into the failure"
 
     # And — the part that was missing — what it was billed.
     assert error.usage is not None

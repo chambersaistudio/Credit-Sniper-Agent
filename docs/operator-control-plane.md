@@ -111,6 +111,26 @@ Recovery after a worker dies mid-flight is asymmetric on purpose:
   and restored in a `finally` — asserted for the failure path too, which is
   the one that matters.
 
+## Concurrency
+
+Everything that costs money claims before it spends, because "is this already
+done?" and "record that it is done" used to be separated by a sixty-second
+model call that another worker could slip through.
+
+- **Operator jobs** claim with `UPDATE … FOR UPDATE SKIP LOCKED`.
+- **Extraction reports** claim the same way, against a
+  `processing_claimed_at` lease (`EXTRACTION_CLAIM_LEASE_SECONDS`, default
+  1800). Re-queueing clears the claim, so a deliberate retry does not wait it
+  out.
+- **Batches** claim under a row lock on the report, record an in-flight marker
+  with a lease, release the lock for the model call, then re-lock and merge
+  the result into a *freshly read* checkpoint. Merging into a snapshot taken
+  before the call would erase any batch that finished while this one ran.
+- **A banked batch is keyed by plan fingerprint, not by its ordinal id.** "b0"
+  is a position; re-indexing can put different tradelines there, and serving
+  the old detail under the new name would attach one account's balances to
+  another.
+
 ## Data rules
 
 Every operator payload passes through `services/operator/sanitize.py` on the

@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # separate worker process drains the queue instead).
     extraction_worker_enabled: bool = True
     extraction_worker_poll_seconds: float = 2.0
+    # How long a worker's claim on a report is honoured. A report whose worker
+    # died is re-claimable after this; until then a second worker leaves it
+    # alone rather than paying to read the same document again.
+    extraction_claim_lease_seconds: int = 1800
 
     # ── Operator control plane ───────────────────────────────────
     # Production QA driven over HTTPS instead of a shell on the box. Every

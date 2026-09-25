@@ -45,6 +45,10 @@ class IndexQuality:
     reasons: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
     missing_pages: list[str] = field(default_factory=list)
+    # The document's real page count, counted locally. None when the caller
+    # had no document to count.
+    actual_page_count: int | None = None
+    out_of_range_pages: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,16 +56,25 @@ class IndexQuality:
             "distinct": self.distinct, "with_pages": self.with_pages,
             "reasons": self.reasons, "duplicates": self.duplicates,
             "missing_pages": self.missing_pages,
+            "actual_page_count": self.actual_page_count,
+            "out_of_range_pages": self.out_of_range_pages,
         }
 
 
-def assess_index(index: ReportIndex | None, *, expected_tradelines: int | None = None) -> IndexQuality:
+def assess_index(index: ReportIndex | None, *, expected_tradelines: int | None = None,
+                 actual_page_count: int | None = None) -> IndexQuality:
     """Is this index good enough to drive detailed extraction?
 
     `expected_tradelines` is for validation against a report whose true count
     a human has confirmed. In production nothing knows the true count, so the
     model's own declared total is the only cross-check available — which is
     precisely why the schema asks for it separately.
+
+    `actual_page_count` is counted locally from the PDF, and is the one thing
+    here that does not depend on the model being honest. Every page number the
+    index reports is checked against it: a `total_pages` the document does not
+    have, or a `source_pages` entry outside it, means the index is pointing at
+    pages that do not exist, and every batch built from it would be wrong.
     """
     if index is None:
         return IndexQuality(ok=False, listed=0, declared=None, distinct=0, with_pages=0,
@@ -101,6 +114,28 @@ def assess_index(index: ReportIndex | None, *, expected_tradelines: int | None =
         reasons.append(f"Bureau not identified (got {index.bureau!r}).")
     if index.unreadable_pages:
         reasons.append(f"Pages could not be read reliably: {sorted(index.unreadable_pages)}.")
+
+    # Deterministic check against the document itself.
+    out_of_range: list[int] = []
+    if actual_page_count is not None:
+        if index.total_pages is not None and index.total_pages != actual_page_count:
+            reasons.append(
+                f"The index says the document has {index.total_pages} pages; it has "
+                f"{actual_page_count}."
+            )
+        out_of_range = sorted({
+            page for tradeline in tradelines for page in (tradeline.source_pages or [])
+            if not 1 <= page <= actual_page_count
+        })
+        if out_of_range:
+            reasons.append(
+                f"Source pages outside this {actual_page_count}-page document: {out_of_range}."
+            )
+    non_positive = sorted({
+        page for tradeline in tradelines for page in (tradeline.source_pages or []) if page < 1
+    })
+    if non_positive and not out_of_range:
+        reasons.append(f"Source pages are not 1-based page numbers: {non_positive}.")
     if expected_tradelines is not None and len(tradelines) != expected_tradelines:
         reasons.append(
             f"Expected {expected_tradelines} tradelines, indexed {len(tradelines)}."
@@ -115,4 +150,6 @@ def assess_index(index: ReportIndex | None, *, expected_tradelines: int | None =
         reasons=reasons,
         duplicates=sorted(set(duplicates)),
         missing_pages=missing_pages,
+        actual_page_count=actual_page_count,
+        out_of_range_pages=out_of_range,
     )

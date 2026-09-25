@@ -172,8 +172,8 @@ def assess_batch(batch, plan, bundle, remap: RemapReport | None = None) -> Batch
             f"{sorted(set(remap.out_of_range))}."
         )
     if batch.unreadable_pages:
-        unreadable = [bundle.to_original(p) or p for p in batch.unreadable_pages]
-        reasons.append(f"Pages could not be read reliably: {sorted(unreadable)}.")
+        # Already original page numbers by the time the gate sees them.
+        reasons.append(f"Pages could not be read reliably: {sorted(batch.unreadable_pages)}.")
 
     return BatchQuality(
         ok=not reasons,

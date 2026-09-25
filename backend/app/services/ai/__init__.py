@@ -4,7 +4,7 @@ workload tier and a Pydantic output type — never a vendor SDK or a model
 name. Output is a *proposal*: callers validate it against deterministic
 application state before anything is stored or acted on.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
@@ -90,13 +90,22 @@ async def generate_document(
     context: dict[str, Any] | None = None,
     max_tokens: int | None = None,
     detail: str | None = None,
+    model: str | None = None,
 ) -> Generation[T]:
     """Send an ORIGINAL document (PDF bytes) to a document-capable provider.
 
     The bytes are never logged and never transformed before the model reads
     them — the whole point is that the model sees the real document rather
-    than text some local parser derived from it."""
+    than text some local parser derived from it.
+
+    `model` overrides the tier's model for THIS CALL ONLY. A benchmark runs
+    inside the same process as the consumer extraction worker, so choosing a
+    model by mutating global settings would let a benchmark silently decide
+    which model a consumer's upload was read by. The override is an argument
+    for exactly that reason."""
     config = resolve_tier(tier)
+    if model:
+        config = replace(config, model=model)
     record = UsageRecord(
         task=task, tier=tier.value, provider=config.provider, model=config.model,
         success=False, context={**(context or {}), "document_bytes": len(document)},
