@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api'
 import { RequireAuth } from './auth'
+import { notFoundMessage } from './lib/build'
 import Home from './pages/Home'
 import Reports from './pages/Reports'
 import UploadReport from './pages/UploadReport'
@@ -55,6 +56,9 @@ function Shell() {
           <Route path="/profile" element={<Profile />} />
           {/* Internal only: no nav entry, reachable by URL. */}
           <Route path="/operator" element={<Operator />} />
+          {/* Without this, an unmatched path renders an empty content area —
+              indistinguishable from a crash, and silent about the usual cause. */}
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </div>
 
@@ -70,6 +74,31 @@ function Shell() {
     </div>
   )
 }
+
+/**
+ * An unmatched route.
+ *
+ * It names the path and the build on purpose. A path that should exist and
+ * renders nothing almost always means the deployment serving the page is older
+ * than the commit that added the route — which is invisible unless the bundle
+ * says which commit it is.
+ */
+function NotFound() {
+  const location = useLocation()
+  const { title, path, stamp, hint } = notFoundMessage(location.pathname)
+  return (
+    <div className="content">
+      <div className="card stack">
+        <div className="card-title">{title}</div>
+        <div className="small muted"><code>{path}</code> is not a route in this build.</div>
+        <div className="small muted">Build: <code>{stamp}</code></div>
+        <p className="tiny muted" style={{ margin: 0 }}>{hint}</p>
+        <a className="btn btn-sm btn-primary" href="/">Home</a>
+      </div>
+    </div>
+  )
+}
+
 
 export default function App() {
   return (
