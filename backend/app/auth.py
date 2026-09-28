@@ -158,16 +158,28 @@ async def _provision_user(db: AsyncSession, claims: dict[str, Any]) -> User:
     return user
 
 
+async def authenticate(request: Request, db: AsyncSession) -> tuple[User, dict[str, Any]]:
+    """The user for this request AND the verified token claims behind it.
+
+    The claims are what the auth provider signed; the `User` row is the
+    consumer's own profile, which they edit in-app. Anything that grants
+    privilege must be decided on the claims — a profile field is whatever the
+    consumer last typed into it. In disabled mode there is no token, so the
+    claims are empty."""
+    if not settings.auth_enabled:
+        return await get_or_create_default_user(db), {}
+    token = _bearer_token(request)
+    claims = await run_in_threadpool(_verify_token, token)
+    return await _provision_user(db, claims), claims
+
+
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
     """The authenticated user for this request.
 
     jwt mode: verified strictly from the bearer token. disabled mode: the
     single local user (dev/test only)."""
-    if not settings.auth_enabled:
-        return await get_or_create_default_user(db)
-    token = _bearer_token(request)
-    claims = await run_in_threadpool(_verify_token, token)
-    return await _provision_user(db, claims)
+    user, _ = await authenticate(request, db)
+    return user
 
 
 async def current_user_id(user: User = Depends(current_user)) -> uuid.UUID:

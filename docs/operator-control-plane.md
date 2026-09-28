@@ -46,12 +46,28 @@ Two principals, one surface:
 
 - **agent** — `OPERATOR_AGENT_TOKEN`, held by the review agent. Sent as
   `X-Operator-Token` (preferred) or `Authorization: Bearer`.
-- **admin** — a signed-in user whose email is on `OPERATOR_ADMIN_EMAILS`, for
-  the mobile operator page. Being signed in is not enough: this surface spends
-  money and reads every report's telemetry, not only the caller's own, so an
-  empty allowlist admits nobody while auth is on. (With `AUTH_MODE=disabled`
-  there is one fixed local user and nobody to keep out, so the list is not
-  applied — that mode is dev/test only either way.)
+- **admin** — a signed-in user whose **verified token** is allowlisted, for the
+  mobile operator page. Being signed in is not enough: this surface spends
+  money and reads every report's telemetry, not only the caller's own, so empty
+  allowlists admit nobody while auth is on. (With `AUTH_MODE=disabled` there is
+  one fixed local user and nobody to keep out — that mode is dev/test only.)
+
+  Admission is decided on what the auth provider **signed**, never on the
+  `User` row:
+
+  - `OPERATOR_ADMIN_SUBJECTS` — the token's `sub` (Clerk's `user_…` id).
+    Immutable, present in every token, needs no provider configuration.
+    **Preferred.** A refused request logs the subject, so the value to allowlist
+    is in the Railway log line that reports the refusal.
+  - `OPERATOR_ADMIN_EMAILS` — the token's `email` claim, case-insensitive, and
+    never when the token says `email_verified: false`. **Clerk's default session
+    token carries no email claim**, so this matches nothing until one is added
+    under Clerk → Sessions → Customize session token.
+
+  Never `User.email`: that is the consumer's own profile field, editable through
+  `PATCH /api/users/me` with no verification. The first version of this gate
+  read it, which let any signed-in account type the owner's address into its
+  profile and become an operator.
 
 Properties, each asserted by a test:
 
@@ -205,7 +221,8 @@ a file is the natural source. The mobile page never sends it.
 |---|---|---|
 | `OPERATOR_AGENT_TOKEN` | a long random secret, e.g. `python -c "import secrets;print('op_'+secrets.token_urlsafe(48))"` | yes, for agent access |
 | `OPERATOR_AGENT_LABEL` | `codex` — appears in audit records, not a secret | no |
-| `OPERATOR_ADMIN_EMAILS` | comma-separated emails allowed to drive `/operator` from a signed-in session. Not a secret | yes, for the mobile page |
+| `OPERATOR_ADMIN_SUBJECTS` | comma-separated auth-provider user ids (the token `sub`, Clerk `user_…`) allowed to drive `/operator`. Not a secret. Preferred | one of these two, for the mobile page |
+| `OPERATOR_ADMIN_EMAILS` | comma-separated emails matched against the token's `email` claim — which Clerk's default token does not carry. Not a secret | one of these two, for the mobile page |
 | `OPERATOR_WORKER_ENABLED` | `true` (default). With it off, jobs queue forever | no |
 | `OPERATOR_WORKER_POLL_SECONDS` | `2` (default) | no |
 | `OPERATOR_RATE_LIMIT_PER_MINUTE` | `60` (default) | no |
@@ -213,9 +230,9 @@ a file is the natural source. The mobile page never sends it.
 | `OPERATOR_JOB_LEASE_SECONDS` | `900` (default) | no |
 
 Leaving `OPERATOR_AGENT_TOKEN` unset disables machine access entirely; the page
-still works for an allowlisted admin. Leaving `OPERATOR_ADMIN_EMAILS` unset does
+still works for an allowlisted admin. Leaving both admin allowlists unset does
 the converse: no signed-in session qualifies and the surface is reachable only
-with the machine credential. Both unset means nobody reaches it at all.
+with the machine credential. All three unset means nobody reaches it at all.
 
 `OPERATOR_WORKER_ENABLED` defaults to **true**, so an unset variable leaves the
 worker running. It is not an activation gate — the gates are the two credentials
@@ -291,6 +308,5 @@ nothing.
 Results render matched accounts, field/payment/provenance accuracy, the gate,
 tokens, latency, cost and every payment-history miss.
 
-Reaching it needs a signed-in session whose email is on
-`OPERATOR_ADMIN_EMAILS`; no machine token is involved, and a browser build never
-contains one.
+Reaching it needs a signed-in session whose verified token is allowlisted (see
+Auth); no machine token is involved, and a browser build never contains one.

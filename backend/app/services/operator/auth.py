@@ -5,9 +5,10 @@ Two principals, one surface:
 
   agent  a machine credential (OPERATOR_AGENT_TOKEN) held by the review/QA
          agent. It exists so production testing can happen without a shell.
-  admin  a signed-in user on the OPERATOR_ADMIN_EMAILS allowlist, for the
-         mobile operator page. Signed in is not enough: this surface spends
-         money and reads every report's telemetry, not only the caller's own.
+  admin  a signed-in user whose VERIFIED TOKEN is allowlisted — by subject
+         (OPERATOR_ADMIN_SUBJECTS) or by a provider-signed email claim
+         (OPERATOR_ADMIN_EMAILS) — for the mobile operator page. Signed in is
+         not enough, and the consumer's own profile fields never count.
 
 The credential is narrow by construction rather than by convention. It is
 accepted only by routes under /api/operator/*, and those routes expose a fixed
@@ -34,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -93,21 +93,37 @@ def _is_agent_token(offered: str | None) -> bool:
     return hmac.compare_digest(offered, configured)
 
 
-def _is_operator_admin(user: User) -> bool:
-    """Whether this signed-in user may drive the operator surface.
+def _is_operator_admin(claims: dict) -> bool:
+    """Whether this verified token may drive the operator surface.
 
-    Fail-closed while auth is on: an empty allowlist admits nobody rather than
-    everybody, because the alternative is that every account that can sign up
-    can also spend money here. With auth disabled there is exactly one fixed
-    local user and no one to keep out, so the list is not applied — that mode
-    is already documented as dev/test only.
+    Decided on the token's CLAIMS — what the auth provider signed — and never on
+    the `User` row. `User.email` is the consumer's own profile field, editable
+    through PATCH /api/users/me with no verification, so authorizing on it let
+    any signed-in account type the owner's address into its profile and become
+    an operator.
+
+    Two ways in, both provider-signed:
+
+    * `sub` on OPERATOR_ADMIN_SUBJECTS — the provider's stable user id. Present
+      in every token, immutable, and needs no provider-side configuration. The
+      preferred form.
+    * an `email` claim on OPERATOR_ADMIN_EMAILS — only when the token carries
+      one (Clerk's default session token does not; it needs a custom claim),
+      and never when the token says that address is unverified.
+
+    Fail-closed while auth is on: empty lists admit nobody. With auth disabled
+    there is one fixed local user and no one to keep out — that mode is already
+    documented as dev/test only.
     """
     if not settings.auth_enabled:
         return True
-    allowed = settings.operator_admins
-    if not allowed:
-        return False
-    return (user.email or "").strip().lower() in allowed
+    subject = str(claims.get("sub") or "").strip()
+    if subject and subject in settings.operator_admin_subject_set:
+        return True
+    email = claims.get("email")
+    if isinstance(email, str) and email.strip() and claims.get("email_verified") is not False:
+        return email.strip().lower() in settings.operator_admins
+    return False
 
 
 # ── Rate limiting ───────────────────────────────────────────────────────
@@ -168,20 +184,32 @@ async def operator_principal(
     # Not the machine credential: fall back to the ordinary signed-in user.
     # Imported here so this module carries no dependency on the consumer auth
     # path beyond the point of use.
-    from app.auth import current_user
+    from app.auth import authenticate
 
     try:
-        user: User = await current_user(request, db)
+        user, claims = await authenticate(request, db)
     except HTTPException:
         raise _UNAUTHENTICATED
-    if not _is_operator_admin(user):
+    if not _is_operator_admin(claims):
         # Signed in is not the same as operator: this surface spends money and
         # reads every report's telemetry, not only the caller's own. Same
         # wording as an unauthenticated request, so the response cannot be used
         # to enumerate who is on the list.
-        logger.warning("Operator access refused for user %s (not an operator admin)", user.id)
+        #
+        # The log names the auth subject — an opaque provider id, the value to
+        # put on OPERATOR_ADMIN_SUBJECTS — and whether the token carried an
+        # email claim at all, which is the usual reason an email allowlist
+        # "does not work". It never logs the email itself.
+        logger.warning(
+            "Operator access refused for user %s: auth subject %s is not on "
+            "OPERATOR_ADMIN_SUBJECTS, and the token %s",
+            user.id, claims.get("sub"),
+            "carries an email claim that is not on OPERATOR_ADMIN_EMAILS"
+            if claims.get("email") else "carries no email claim",
+        )
         raise _UNAUTHENTICATED
-    return OperatorPrincipal(kind="admin", label=user.email or "admin", user_id=user.id)
+    return OperatorPrincipal(kind="admin", label=str(claims.get("sub") or "admin"),
+                             user_id=user.id)
 
 
 async def operator_request(

@@ -11,14 +11,25 @@ The rule asserted here is fail-closed: while auth is on, an empty allowlist
 admits nobody. A deployment that forgot to configure its operators is reachable
 only with the machine credential, which is the safe way to be wrong.
 
+And it is decided on the VERIFIED TOKEN, never on the `User` row. The first
+version of this gate read `User.email` — a profile field any consumer edits
+through PATCH /api/users/me with no verification — so any account could type
+the owner's address into its profile and become an operator. Meanwhile the
+owner was locked out: Clerk's default session token carries no email claim, so
+the owner's row held only the `@auth.local` placeholder minted at first sign-in.
+
 No network, no provider spend.
 """
+import logging
+import time
+
 import httpx
+import jwt
 import pytest
 
 from app.services.operator.auth import reset_rate_limits
 from tests.conftest import drain_operator_queue, requires_db
-from tests.test_auth import KID, _headers, _private_key  # noqa: F401
+from tests.test_auth import ISSUER, KID, _headers, _private_key  # noqa: F401
 from tests.test_operator_api import (  # noqa: F401
     AGENT_HEADERS, AGENT_TOKEN, B0_TRUTH, _seed_report, batch_ai,
 )
@@ -43,6 +54,7 @@ def jwt_operator_env(monkeypatch):
     monkeypatch.setattr(settings, "operator_agent_token", AGENT_TOKEN)
     monkeypatch.setattr(settings, "operator_agent_label", "codex")
     monkeypatch.setattr(settings, "operator_admin_emails", "")
+    monkeypatch.setattr(settings, "operator_admin_subjects", "")
     auth.jwks_cache.seed(KID, _private_key.public_key())
     reset_rate_limits()
     yield settings
@@ -207,3 +219,100 @@ async def test_the_whole_phone_sequence_works_without_the_machine_credential(
     assert "truth" not in job["request"]
     assert job["request"]["truth_fingerprint"]
     assert job["result"]["accounts"]["asked"] == 4
+
+
+# ── The source of truth is the token, not the profile ────────────────────
+
+def _claims_headers(sub: str, **claims) -> dict:
+    """A signed token with arbitrary extra claims (email_verified, etc.)."""
+    now = int(time.time())
+    body = {"sub": sub, "iss": ISSUER, "iat": now, "exp": now + 3600, **claims}
+    token = jwt.encode(body, _private_key, algorithm="RS256", headers={"kid": KID})
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def test_typing_the_owners_email_into_a_profile_does_not_make_an_operator(
+    client, jwt_operator_env,
+):
+    """The escalation the first version of this gate allowed.
+
+    `User.email` is whatever the consumer last typed: PATCH /api/users/me takes
+    it with no verification. A gate that read it let any signed-in account put
+    the owner's address in its own profile and walk in."""
+    jwt_operator_env.operator_admin_emails = OWNER
+    attacker = _claims_headers("user_attacker")  # no email claim, like Clerk's default
+    patched = await client.patch("/api/users/me", json={"email": OWNER}, headers=attacker)
+    assert patched.status_code == 200
+    assert patched.json()["email"] == OWNER  # the profile really does say so now
+
+    for path in OPERATOR_PATHS:
+        assert (await client.get(path, headers=attacker)).status_code == 401, path
+
+
+async def test_the_allowlisted_token_email_wins_over_a_different_profile_email(
+    client, jwt_operator_env,
+):
+    """The owner's situation, the other way round: their profile holds something
+    else (the `@auth.local` placeholder, or an address they typed), and the
+    token the provider signed says the allowlisted address."""
+    jwt_operator_env.operator_admin_emails = OWNER
+    owner = _claims_headers("user_owner_2", email=OWNER)
+    await client.get("/api/users/me", headers=owner)  # provision
+    await client.patch("/api/users/me", json={"email": "something-else@example.com"},
+                       headers=owner)
+    assert (await client.get("/api/operator/whoami", headers=owner)).status_code == 200
+
+
+async def test_a_non_allowlisted_token_email_fails_closed_whatever_the_profile_says(
+    client, jwt_operator_env,
+):
+    jwt_operator_env.operator_admin_emails = OWNER
+    stranger = _claims_headers("user_stranger_2", email=STRANGER)
+    await client.get("/api/users/me", headers=stranger)
+    # Even with the owner's address in the profile — and it must be unclaimed
+    # for this to succeed, which is exactly the owner's real situation.
+    await client.patch("/api/users/me", json={"email": OWNER.replace("owner", "owner2")},
+                       headers=stranger)
+    assert (await client.get("/api/operator/whoami", headers=stranger)).status_code == 401
+
+
+async def test_an_email_the_token_says_is_unverified_does_not_count(client, jwt_operator_env):
+    jwt_operator_env.operator_admin_emails = OWNER
+    unverified = _claims_headers("user_unverified", email=OWNER, email_verified=False)
+    assert (await client.get("/api/operator/whoami", headers=unverified)).status_code == 401
+
+
+async def test_the_subject_allowlist_works_with_no_email_anywhere(client, jwt_operator_env):
+    """Clerk's default session token has no email claim at all, so the subject
+    is the form that works with no provider-side configuration."""
+    jwt_operator_env.operator_admin_subjects = "user_2abcOWNER"
+    owner = _claims_headers("user_2abcOWNER")
+    who = await client.get("/api/operator/whoami", headers=owner)
+    assert who.status_code == 200
+    assert who.json()["kind"] == "admin"
+
+
+async def test_subjects_are_matched_exactly(client, jwt_operator_env):
+    """Opaque ids: no case folding, no prefix match."""
+    jwt_operator_env.operator_admin_subjects = " user_2abcOWNER , user_other "
+    assert (await client.get("/api/operator/whoami",
+                             headers=_claims_headers("user_2abcOWNER"))).status_code == 200
+    for near_miss in ("user_2abcowner", "user_2abcOWNE", "user_2abcOWNERx"):
+        assert (await client.get("/api/operator/whoami",
+                                 headers=_claims_headers(near_miss))).status_code == 401, near_miss
+
+
+async def test_the_refusal_log_says_what_to_allowlist_and_never_the_email(
+    client, jwt_operator_env, caplog,
+):
+    """Railway's log is where the owner found this refusal. It should say what
+    to put on the allowlist, and why an email allowlist matched nothing."""
+    jwt_operator_env.operator_admin_emails = OWNER
+    with caplog.at_level(logging.WARNING, logger="app.services.operator.auth"):
+        await client.get("/api/operator/whoami", headers=_claims_headers("user_2abcNOPE"))
+        await client.get("/api/operator/whoami",
+                         headers=_claims_headers("user_2abcMAIL", email=STRANGER))
+    text = caplog.text
+    assert "user_2abcNOPE" in text and "carries no email claim" in text
+    assert "user_2abcMAIL" in text and "not on OPERATOR_ADMIN_EMAILS" in text
+    assert STRANGER not in text and OWNER not in text

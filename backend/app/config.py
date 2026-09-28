@@ -81,13 +81,21 @@ class Settings(BaseSettings):
     # A label for that credential in audit records, so a job says who ran it
     # without any part of the token appearing anywhere.
     operator_agent_label: str = "agent"
-    # Who may drive the operator surface from a signed-in session, as a
-    # comma-separated list of email addresses. It is an allowlist, not a
-    # secret: the operator surface spends money and reads every report's
-    # telemetry, so "signed in" is not the same as "operator". Empty means no
-    # signed-in user qualifies while auth is on — the deployment is then
-    # reachable only with the machine credential. (With auth disabled there is
-    # one fixed local user and nobody to keep out, so the list is not applied.)
+    # Who may drive the operator surface from a signed-in session. Allowlists,
+    # not secrets: the operator surface spends money and reads every report's
+    # telemetry, so "signed in" is not the same as "operator".
+    #
+    # Both are matched against the VERIFIED TOKEN, never the consumer's profile
+    # (which they edit freely in-app):
+    #   OPERATOR_ADMIN_SUBJECTS  the provider's user id (the token's `sub`,
+    #                            e.g. Clerk's `user_…`). Immutable, in every
+    #                            token, needs no provider config. Preferred.
+    #   OPERATOR_ADMIN_EMAILS    the token's `email` claim. Clerk's default
+    #                            session token carries none, so this matches
+    #                            nothing until a custom claim is added there.
+    # Both empty means no signed-in user qualifies while auth is on. (With auth
+    # disabled there is one fixed local user and nobody to keep out.)
+    operator_admin_subjects: str = ""
     operator_admin_emails: str = ""
     # Runs the operator job worker in this process. Off in tests, which drive
     # the queue explicitly.
@@ -159,6 +167,13 @@ class Settings(BaseSettings):
     @property
     def auth_enabled(self) -> bool:
         return self.auth_mode == "jwt"
+
+    @property
+    def operator_admin_subject_set(self) -> frozenset[str]:
+        """Provider subjects are opaque ids: compared exactly, never folded."""
+        return frozenset(
+            s.strip() for s in self.operator_admin_subjects.split(",") if s.strip()
+        )
 
     @property
     def operator_admins(self) -> frozenset[str]:
