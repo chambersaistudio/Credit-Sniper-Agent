@@ -4,9 +4,10 @@ import { describe, it } from 'node:test'
 
 import {
   BENCHMARK_CONFIGS, DEFAULT_TRUTH_LABEL, benchmarkBlockedReason, benchmarkRequest,
-  configFor, confirmationFor, isJobRunning, jobSummary, parseTruthText, paymentByAccount,
-  paymentMisses, pct, shortFingerprint, truthCounts, truthFor, truthStatus, truthToText,
-  usd,
+  configFor, confirmationFor, draftConfirmationFor, draftInFlight, isJobRunning, jobSummary,
+  modelLabel, newIdempotencyKey, parseTruthText, paymentByAccount, paymentMisses, pct,
+  shortFingerprint, truthCounts, truthDraftRequest, truthFor, truthNextStep, truthStatus,
+  truthToText, usd,
 } from '../src/lib/operator.js'
 
 describe('benchmark configs', () => {
@@ -217,7 +218,7 @@ describe('truthStatus', () => {
     const status = truthStatus({ verified: false, source: 'drafted_from_batch' })
     assert.equal(status.canBenchmark, false)
     assert.match(status.label, /Draft/)
-    assert.match(status.detail, /own extraction/)
+    assert.match(status.detail, /model's own read/)
     // A drafted entry must never read the same as one a human entered.
     assert.notEqual(status.label, truthStatus({ verified: false, source: 'operator' }).label)
   })
@@ -282,5 +283,122 @@ describe('truth editing', () => {
     const parsed = parseTruthText('{"accounts": [{"creditor_name": "X"}]}')
     assert.equal(parsed.error, undefined)
     assert.deepEqual(parsed.accounts, [{ creditor_name: 'X' }])
+  })
+})
+
+
+describe('truthNextStep — what the panel offers when there is no truth', () => {
+  it('offers the paid draft, not a blank editor, when nothing is banked', () => {
+    // The production dead end: no truth, no banked batch. A blank Save flow
+    // read as the next step and meant typing every account into JSON.
+    const next = truthNextStep({ summary: null, banked: false })
+    assert.equal(next.step, 'draft-with-model')
+    assert.match(next.detail, /no banked extraction/)
+    assert.match(next.detail, /banks nothing/)
+    assert.match(next.detail, /unverified/)
+  })
+
+  it('offers the free draft when the batch is banked', () => {
+    assert.equal(truthNextStep({ summary: null, banked: true }).step, 'draft-from-banked')
+  })
+
+  it('moves on to correcting and verifying once something is stored', () => {
+    assert.equal(truthNextStep({ summary: { verified: false }, banked: false }).step,
+      'correct-and-verify')
+    assert.equal(truthNextStep({ summary: { verified: true }, banked: true }).step, 'ready')
+  })
+})
+
+describe('truthDraftRequest', () => {
+  it('sends one config and acknowledges only Sol', () => {
+    const base = { reportId: 'r1', batchId: 'b0' }
+    assert.deepEqual(truthDraftRequest({ ...base, config: 'A' }),
+      { report_id: 'r1', batch_id: 'b0', config: 'A' })
+    assert.equal(truthDraftRequest({ ...base, config: 'B' }).acknowledge_expensive, undefined)
+    assert.equal(truthDraftRequest({ ...base, config: 'C' }).acknowledge_expensive, true)
+  })
+
+  it('never sends account values — a draft is read from the document', () => {
+    const body = truthDraftRequest({ reportId: 'r1', batchId: 'b0', config: 'A' })
+    assert.equal('truth' in body, false)
+  })
+})
+
+describe('draftConfirmationFor', () => {
+  it('says it is paid, banks nothing, and is only a draft', () => {
+    const prompt = draftConfirmationFor('A', 'b0')
+    assert.match(prompt.title, /b0/)
+    assert.match(prompt.body, /one paid model call/)
+    assert.match(prompt.body, /banks nothing/)
+    assert.match(prompt.body, /correct and verify/)
+  })
+
+  it('warns up front that the drafting model will be flagged against its own read', () => {
+    assert.match(draftConfirmationFor('A', 'b0').body, /Luna benchmark against it will be flagged/)
+  })
+
+  it('keeps the Sol wording distinct', () => {
+    const sol = draftConfirmationFor('C', 'b0')
+    assert.equal(sol.requiresAck, true)
+    assert.match(sol.body, /expensive escalation model/)
+    assert.notEqual(sol.confirmLabel, draftConfirmationFor('A', 'b0').confirmLabel)
+    assert.equal(draftConfirmationFor('D', 'b0'), null)
+  })
+})
+
+describe('drafted truth status', () => {
+  it('names the model that drafted it', () => {
+    const status = truthStatus({ verified: false, source: 'drafted_from_model',
+                                 drafted_by_model: 'gpt-5.6-terra' })
+    assert.equal(status.canBenchmark, false)
+    assert.match(status.label, /Draft/)
+    assert.match(status.detail, /by Terra/)
+  })
+
+  it('stays flagged after it is verified', () => {
+    const status = truthStatus({ verified: true, source: 'operator',
+                                 drafted_by_model: 'gpt-5.6-luna' })
+    assert.equal(status.canBenchmark, true)
+    assert.match(status.detail, /Luna benchmark against it is flagged/)
+  })
+
+  it('maps model ids to their labels', () => {
+    assert.equal(modelLabel('gpt-5.6-sol'), 'Sol')
+    assert.equal(modelLabel('some-other-model'), 'some-other-model')
+    assert.equal(modelLabel(null), '')
+  })
+})
+
+describe('draftInFlight', () => {
+  const jobs = [
+    { operation: 'draft_truth_batch', status: 'running', request: { batch_id: 'b0' } },
+    { operation: 'draft_truth_batch', status: 'succeeded', request: { batch_id: 'b1' } },
+    { operation: 'benchmark_batch', status: 'running', request: { batch_id: 'b1' } },
+  ]
+
+  it('finds a running draft for this batch only', () => {
+    assert.ok(draftInFlight(jobs, 'b0'))
+    assert.equal(draftInFlight(jobs, 'b1'), null)  // finished draft, running benchmark
+    assert.equal(draftInFlight([], 'b0'), null)
+    assert.equal(draftInFlight(null, 'b0'), null)
+  })
+})
+
+describe('newIdempotencyKey', () => {
+  it('is unique per confirmation and says what it bought', () => {
+    const a = newIdempotencyKey('draft', 'b0', 'A')
+    const b = newIdempotencyKey('draft', 'b0', 'A')
+    assert.notEqual(a, b)
+    assert.ok(a.startsWith('draft-b0-A-'))
+    assert.ok(a.length <= 200, 'the server caps keys at 200 characters')
+  })
+})
+
+describe('jobSummary for a draft', () => {
+  it('reports counts and the next step, never values', () => {
+    assert.equal(jobSummary({
+      operation: 'draft_truth_batch', status: 'succeeded',
+      result: { accounts_drafted: 4, months_drafted: 36 },
+    }), 'Drafted 4 accounts · 36 months — correct and verify')
   })
 })

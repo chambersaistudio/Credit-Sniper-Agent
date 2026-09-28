@@ -3,9 +3,10 @@ import { api } from '../api'
 import { ErrorBox, Loading, PageHeader, useAsync } from '../components/ui'
 import {
   BENCHMARK_CONFIGS, DEFAULT_TRUTH_LABEL, benchmarkBlockedReason, benchmarkRequest,
-  confirmationFor, isJobRunning, jobSummary, parseTruthText, paymentByAccount,
-  paymentMisses, pct, shortFingerprint, truthCounts, truthFor, truthStatus, truthToText,
-  usd,
+  confirmationFor, draftConfirmationFor, draftInFlight, isJobRunning, jobSummary,
+  newIdempotencyKey, parseTruthText, paymentByAccount, paymentMisses, pct,
+  shortFingerprint, truthCounts, truthDraftRequest, truthFor, truthNextStep, truthStatus,
+  truthToText, usd,
 } from '../lib/operator'
 
 // Internal tooling: reachable by URL, absent from navigation, and it spends
@@ -102,18 +103,35 @@ function ReportDetail({ reportId, onBack }) {
     return () => clearTimeout(timer)
   }, [jobs, refreshJobs])
 
+  // A draft job writes truth when it finishes, so the truth panel re-reads
+  // once the job list has settled rather than waiting for a manual refresh.
+  const settled = !jobs.some(j => isJobRunning(j.status))
+  useEffect(() => { if (settled) refreshTruths() }, [settled, refreshTruths])
+
   const truth = truthFor(truths, batchId)
   const blocked = benchmarkBlockedReason(truth)
 
-  // The run sends a reference, not the account values: the truth is already
-  // stored server-side and the job records which version it was scored
-  // against, so a correction cannot silently change the question.
-  const run = async (config) => {
+  // Every paid action goes through one confirmation, which carries its own
+  // idempotency key: a double tap on the confirm button reuses the first job
+  // instead of buying a second one.
+  const confirm = (kind, config) =>
+    setPending({ kind, config, key: newIdempotencyKey(kind, batchId, config) })
+
+  // A benchmark sends a reference, not the account values: the truth is
+  // already stored server-side and the job records which version it was
+  // scored against, so a correction cannot silently change the question.
+  const run = async ({ kind, config, key }) => {
     setError(null)
     try {
-      await api.queueBenchmark(benchmarkRequest({
-        reportId, batchId, config, truthLabel: DEFAULT_TRUTH_LABEL,
-      }))
+      if (kind === 'draft') {
+        await api.queueTruthDraft(truthDraftRequest({
+          reportId, batchId, config, idempotencyKey: key,
+        }))
+      } else {
+        await api.queueBenchmark(benchmarkRequest({
+          reportId, batchId, config, truthLabel: DEFAULT_TRUTH_LABEL, idempotencyKey: key,
+        }))
+      }
       setPending(null)
       await refreshJobs()
     } catch (e) {
@@ -164,6 +182,8 @@ function ReportDetail({ reportId, onBack }) {
       {plan.data && (
         <TruthPanel reportId={reportId} batchId={batchId} summary={truth}
           banked={Boolean(checkpoint.data?.batches?.[batchId])}
+          draftJob={draftInFlight(jobs, batchId)}
+          onRequestDraft={config => confirm('draft', config)}
           onChanged={refreshTruths} />
       )}
 
@@ -174,7 +194,7 @@ function ReportDetail({ reportId, onBack }) {
             {BENCHMARK_CONFIGS.map(c => (
               <button key={c.config} disabled={Boolean(blocked)}
                 className={`btn btn-sm${c.expensive ? '' : ' btn-primary'}`}
-                onClick={() => setPending(c.config)}>
+                onClick={() => confirm('benchmark', c.config)}>
                 Run {c.label}
               </button>
             ))}
@@ -190,7 +210,10 @@ function ReportDetail({ reportId, onBack }) {
 
       {error && <div className="alert alert-error">{error}</div>}
       {pending && (
-        <ConfirmPaid config={pending} batchId={batchId}
+        <ConfirmPaid
+          prompt={pending.kind === 'draft'
+            ? draftConfirmationFor(pending.config, batchId)
+            : confirmationFor(pending.config, batchId)}
           onCancel={() => setPending(null)} onConfirm={() => run(pending)} />
       )}
 
@@ -215,12 +238,13 @@ function ReportDetail({ reportId, onBack }) {
  * draft prefilled from a model's own extraction reads exactly like truth and
  * is not: scoring that model against it would measure self-consistency.
  */
-function TruthPanel({ reportId, batchId, summary, banked, onChanged }) {
+function TruthPanel({ reportId, batchId, summary, banked, draftJob, onRequestDraft, onChanged }) {
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const status = truthStatus(summary)
+  const next = truthNextStep({ summary, banked })
 
   // A new batch selection is a different truth; never carry an open editor
   // (and its values) across.
@@ -295,19 +319,46 @@ function TruthPanel({ reportId, batchId, summary, banked, onChanged }) {
           ? <>{truthCounts(summary)} · {shortFingerprint(summary)}</>
           : 'Nothing stored for this batch yet.'}
       </div>
-      <p className="tiny muted" style={{ margin: 0 }}>{status.detail}</p>
+      {next.step !== 'draft-with-model' && (
+        <p className="tiny muted" style={{ margin: 0 }}>{status.detail}</p>
+      )}
       {summary?.note && <p className="tiny muted" style={{ margin: 0 }}>{summary.note}</p>}
 
       {error && <div className="alert alert-error">{error}</div>}
 
-      {!editing ? (
+      {!editing && !summary && next.step === 'draft-with-model' ? (
+        // No truth and nothing banked. A blank editor with a Save button would
+        // read as the next step, and it means typing every account by hand —
+        // so the page names what is missing and offers the paid draft instead.
+        <div className="stack">
+          <div className="alert alert-warn">
+            <strong>{next.title}</strong>
+            <p className="small" style={{ margin: '6px 0 0' }}>{next.detail}</p>
+          </div>
+          {draftJob ? (
+            <div className="small muted">Drafting with {draftJob.request?.config}… this takes about a minute.</div>
+          ) : (
+            <div className="grid-2">
+              {BENCHMARK_CONFIGS.map(c => (
+                <button key={c.config} className={`btn btn-sm${c.expensive ? '' : ' btn-primary'}`}
+                  onClick={() => onRequestDraft(c.config)}>
+                  Draft with {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+          <button className="btn btn-sm btn-ghost" disabled={busy} onClick={openEditor}>
+            Enter by hand instead
+          </button>
+        </div>
+      ) : !editing ? (
         <div className="grid-2">
           <button className="btn btn-sm" disabled={busy} onClick={openEditor}>
             {summary ? 'Review & correct' : 'Enter truth'}
           </button>
           {banked && !summary && (
-            <button className="btn btn-sm" disabled={busy} onClick={draft}>
-              Draft from banked
+            <button className="btn btn-sm btn-primary" disabled={busy} onClick={draft}>
+              Draft from banked (free)
             </button>
           )}
           {summary && !summary.verified && (
@@ -385,8 +436,7 @@ function CheckpointSummary({ checkpoint }) {
   )
 }
 
-function ConfirmPaid({ config, batchId, onCancel, onConfirm }) {
-  const prompt = confirmationFor(config, batchId)
+function ConfirmPaid({ prompt, onCancel, onConfirm }) {
   return (
     <div className={`alert alert-${prompt.requiresAck ? 'error' : 'warn'}`} role="alertdialog">
       <strong>{prompt.title}</strong>
@@ -423,8 +473,19 @@ function JobCard({ job }) {
             <Stat label="Model calls" value={`${job.model_calls_made}/${job.max_model_calls}`} />
           </div>
           {job.error && <div className="alert alert-error">{job.error.message}</div>}
-          {result && (
+          {result && job.operation === 'draft_truth_batch' && (
+            <div className="grid-2">
+              <Stat label="Accounts" value={result.accounts_drafted} />
+              <Stat label="Months" value={result.months_drafted} />
+              <Stat label="Gate" value={result.gate?.ok ? 'PASS' : 'FAIL'} />
+              <Stat label="Banked" value={result.banked_batches_unchanged ? 'unchanged' : 'CHANGED'} />
+            </div>
+          )}
+          {result && job.operation === 'benchmark_batch' && (
             <>
+              {result.anchoring_warning && (
+                <div className="alert alert-warn small">{result.anchoring_warning}</div>
+              )}
               <div className="grid-2">
                 <Stat label="Matched" value={`${result.accounts?.matched}/${result.accounts?.asked}`} />
                 <Stat label="Gate" value={result.gate?.ok ? 'PASS' : 'FAIL'} />

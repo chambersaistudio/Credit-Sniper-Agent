@@ -49,11 +49,19 @@ class BenchmarkTruth(Base):
     # False until a human confirms it against the document. A benchmark will
     # not run against unverified truth.
     verified = Column(Boolean, nullable=False, default=False)
-    # Where it came from: "operator" (entered/corrected by hand) or
-    # "drafted_from_batch" (prefilled from a banked extraction, which is why
-    # it starts unverified).
+    # Where it came from: "operator" (entered/corrected by hand),
+    # "drafted_from_batch" (prefilled from a banked extraction) or
+    # "drafted_from_model" (prefilled by a paid, non-banking model read of the
+    # batch). Both drafts start unverified.
     source = Column(String, nullable=False, default="operator")
     note = Column(Text)
+
+    # Which model prefilled it, kept through human corrections. Correcting a
+    # draft anchors on it — an error the reviewer misses survives, and it is
+    # that model's error — so a benchmark of the same model against truth it
+    # drafted is flagged rather than presented as an independent measurement.
+    drafted_by_model = Column(String)
+    drafted_by_config = Column(String)
 
     created_by = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

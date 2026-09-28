@@ -153,6 +153,23 @@ class BenchmarkBatchRequest(BaseModel):
     acknowledge_expensive: bool = False
 
 
+def _require_batch(report, batch_id: str, batch_size: int, context_pages: int) -> None:
+    """Fail fast on a batch that does not exist, before a job is created and
+    before the paid budget is spent."""
+    try:
+        plans = reads.batch_plans(report, batch_size=batch_size, context_pages=context_pages)
+    except NoBankedIndex:
+        raise HTTPException(
+            status_code=409,
+            detail="This report has no banked Stage-1 index; run the index pass first.",
+        )
+    if batch_id not in {p.batch_id for p in plans}:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No batch {batch_id!r}; this report has {[p.batch_id for p in plans]}",
+        )
+
+
 @router.post("/jobs/benchmark-batch", response_model=dict[str, Any], status_code=202)
 async def queue_benchmark_batch(
     body: BenchmarkBatchRequest,
@@ -172,21 +189,7 @@ async def queue_benchmark_batch(
         )
 
     report = await _report(db, body.report_id)
-    # Fail fast on a batch that does not exist, before a job is created and
-    # before the paid budget is spent.
-    try:
-        plans = reads.batch_plans(report, batch_size=body.batch_size,
-                                  context_pages=body.context_pages)
-    except NoBankedIndex:
-        raise HTTPException(
-            status_code=409,
-            detail="This report has no banked Stage-1 index; run the index pass first.",
-        )
-    if body.batch_id not in {p.batch_id for p in plans}:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No batch {body.batch_id!r}; this report has {[p.batch_id for p in plans]}",
-        )
+    _require_batch(report, body.batch_id, body.batch_size, body.context_pages)
 
     # Resolve the truth BEFORE queueing, so the job records which truth it is
     # scored against and a later correction cannot silently answer a different
@@ -239,6 +242,70 @@ async def queue_benchmark_batch(
         "model": model,
         "max_model_calls": job.max_model_calls,
     }
+
+
+class DraftTruthRequest(BaseModel):
+    report_id: str
+    batch_id: str = "b0"
+    # One config per job, as for benchmarks.
+    config: Literal["A", "B", "C"]
+    truth_label: str = Field(default=DEFAULT_LABEL, max_length=100)
+    batch_size: int = Field(default=4, ge=1, le=8)
+    context_pages: int = Field(default=1, ge=0, le=3)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+    acknowledge_expensive: bool = False
+
+
+@router.post("/jobs/draft-truth", response_model=dict[str, Any], status_code=202)
+async def queue_draft_truth(
+    body: DraftTruthRequest,
+    principal: OperatorPrincipal = Depends(operator_request),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue ONE paid model read of ONE batch, stored as an UNVERIFIED truth draft.
+
+    For a batch with nothing banked to draft from — otherwise the only way to
+    get truth is to type four accounts of payment grid into a phone. The read
+    goes through `extract_batch`, which touches no database, so nothing is
+    banked and the report's extraction is unchanged.
+
+    It is a draft and nothing more. The benchmark refuses it until a human has
+    corrected it against the document and verified it, and the model that
+    drafted it is recorded so a later benchmark of that same model says it is
+    being scored against its own corrected output.
+
+    Refused, before anything is spent, when truth is already stored for this
+    batch: a paid draft must never overwrite someone's corrections."""
+    model, _ = BENCHMARK_CONFIGS[body.config]
+    if body.config in CONFIGS_REQUIRING_ACK and not body.acknowledge_expensive:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Config {body.config} uses {model}, the expensive escalation model. "
+                    "Re-send with acknowledge_expensive=true to confirm."),
+        )
+
+    report = await _report(db, body.report_id)
+    _require_batch(report, body.batch_id, body.batch_size, body.context_pages)
+    if await truth_service.get(db, report.id, body.batch_id, body.truth_label) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Truth is already stored for {body.batch_id}. Correct it instead of "
+                   f"paying to draft over it.",
+        )
+
+    check_paid_rate_limit(principal)
+    try:
+        job, created = await enqueue(
+            db, operation="draft_truth_batch",
+            request=body.model_dump(exclude={"idempotency_key"}),
+            requested_by=principal.audit_name, report_id=report.id,
+            idempotency_key=body.idempotency_key,
+        )
+    except DuplicateRequest as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    await db.commit()
+    return {**job_to_dict(job), "created": created, "model": model,
+            "max_model_calls": job.max_model_calls}
 
 
 # ── Benchmark truth ─────────────────────────────────────────────────────
@@ -345,12 +412,19 @@ async def draft_truth(
             status_code=409,
             detail=f"Batch {batch_id} has no banked extraction to draft from.",
         )
+    if await truth_service.get(db, report.id, batch_id, label) is not None:
+        # Even free, drafting over stored truth would discard someone's corrections.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Truth is already stored for {batch_id}. Correct it instead of "
+                   f"drafting over it.",
+        )
     try:
         drafted = truth_service.draft_from_batch(banked)
         row = await truth_service.upsert(
             db, report_id=report.id, batch_id=batch_id, accounts=drafted,
             created_by=principal.audit_name, label=label, verified=False,
-            source="drafted_from_batch",
+            source="drafted_from_batch", drafted_by_model=banked.get("model"),
             note="Drafted from the banked extraction. Correct against the document, "
                  "then verify. Not truth until then.",
         )

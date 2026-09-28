@@ -62,6 +62,17 @@ OPERATIONS: dict[str, Operation] = {
         requires_ack=False,  # per-config; see CONFIGS_REQUIRING_ACK
         resumable=False,
     ),
+    "draft_truth_batch": Operation(
+        name="draft_truth_batch",
+        summary="Read one batch under one model and store the result as an UNVERIFIED "
+                "benchmark-truth draft, for a batch with nothing banked to draft from. "
+                "Banks nothing; refuses to overwrite truth that is already stored.",
+        paid=True,
+        max_model_calls=1,
+        models=tuple(model for model, _ in BENCHMARK_CONFIGS.values()),
+        requires_ack=False,  # per-config; see CONFIGS_REQUIRING_ACK
+        resumable=False,
+    ),
     "diagnose_report": Operation(
         name="diagnose_report",
         summary="Processing history, classified failure, checkpoint shape and AI usage "

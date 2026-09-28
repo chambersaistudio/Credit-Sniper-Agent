@@ -249,6 +249,12 @@ async def run_job(job_id, *, session_factory=None) -> str:
             # The real exception goes to the server log; the operator gets a
             # class and a message we wrote.
             logger.exception("Operator job %s (%s) failed", job.id, job.operation)
+            # Undo whatever the handler wrote. The job is recorded in the same
+            # session, so without this a handler that wrote (a truth draft) and
+            # then failed — or passed but broke its budget in `meter.verify` —
+            # would persist its writes under a job that says it failed.
+            await db.rollback()
+            job = await db.get(OperatorJob, job_id)
             job.status = JobStatus.FAILED
             job.safe_error_class, job.safe_error_message = safe_error(e)
             job.result_json = None

@@ -99,10 +99,18 @@ def test_every_allowlisted_operation_declares_a_cost_policy():
             assert op.resumable
 
 
-def test_the_only_paid_operation_is_the_benchmark_and_it_allows_one_call():
+def test_the_paid_operations_are_exactly_these_and_each_allows_one_call():
+    """Adding a paid operation is a deliberate act that must change this test.
+
+    Both paid operations read one batch under one model; neither banks, and
+    neither is resumable, because re-running an interrupted one would buy the
+    same read twice."""
     paid = {name for name, op in OPERATIONS.items() if op.paid}
-    assert paid == {"benchmark_batch"}
-    assert get_operation("benchmark_batch").max_model_calls == 1
+    assert paid == {"benchmark_batch", "draft_truth_batch"}
+    for name in paid:
+        op = get_operation(name)
+        assert op.max_model_calls == 1, name
+        assert op.resumable is False, name
 
 
 def test_an_operation_outside_the_allowlist_cannot_be_named():

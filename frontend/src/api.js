@@ -90,6 +90,9 @@ export const api = {
   operatorJob: (jobId) => request(`/operator/jobs/${jobId}`),
   queueBenchmark: (body) =>
     request('/operator/jobs/benchmark-batch', { method: 'POST', body }),
+  // One paid read of one batch, stored as an UNVERIFIED truth draft. Banks nothing.
+  queueTruthDraft: (body) =>
+    request('/operator/jobs/draft-truth', { method: 'POST', body }),
 
   // Benchmark truth lives server-side: entered or corrected once, then named
   // by (batch, label). The listing carries counts and status only, never the

@@ -54,6 +54,13 @@ class TruthChanged(ValueError):
     """The stored truth is not the one this job was queued against."""
 
 
+class TruthExists(ValueError):
+    """Truth is already stored; a paid draft would overwrite someone's work."""
+
+
+_UNSET = object()
+
+
 def fingerprint(accounts: dict[str, Any]) -> str:
     """Stable hash of a truth set, so a correction is detectable."""
     return hashlib.sha256(
@@ -118,11 +125,16 @@ async def list_for_report(db: AsyncSession, report_id) -> list[BenchmarkTruth]:
 
 async def upsert(db: AsyncSession, *, report_id, batch_id: str, accounts: dict[str, Any],
                  created_by: str, label: str = DEFAULT_LABEL, verified: bool = False,
-                 source: str = "operator", note: str | None = None) -> BenchmarkTruth:
+                 source: str = "operator", note: str | None = None,
+                 drafted_by_model=_UNSET, drafted_by_config=_UNSET) -> BenchmarkTruth:
     """Store or correct a truth set.
 
     Correcting it resets `verified` unless the caller says otherwise, because
-    the confirmation was of the previous values."""
+    the confirmation was of the previous values.
+
+    Draft lineage survives a correction unless the caller replaces it: a set
+    that began as a model's draft is still anchored on that model after a
+    human edits it."""
     payload = validate(accounts)
     existing = await get(db, report_id, batch_id, label)
     if existing is None:
@@ -136,6 +148,10 @@ async def upsert(db: AsyncSession, *, report_id, batch_id: str, accounts: dict[s
     existing.verified = verified
     existing.source = source
     existing.note = note
+    if drafted_by_model is not _UNSET:
+        existing.drafted_by_model = drafted_by_model
+    if drafted_by_config is not _UNSET:
+        existing.drafted_by_config = drafted_by_config
     existing.updated_at = datetime.now(timezone.utc)
     await db.flush()
     return existing
@@ -206,6 +222,21 @@ def draft_from_batch(banked: dict[str, Any]) -> dict[str, Any]:
     return {"accounts": rows}
 
 
+def anchoring_note(truth: BenchmarkTruth | None, model: str | None) -> str | None:
+    """A warning when a model is scored against truth it drafted, else None.
+
+    Verified truth that began as this model's draft is not an independent
+    measurement of it: the reviewer corrected what they noticed, and whatever
+    they missed agrees with the model by construction."""
+    if truth is None or not truth.drafted_by_model or not model:
+        return None
+    if truth.drafted_by_model != model:
+        return None
+    return (f"This truth was drafted by {model} and corrected by hand. Scoring {model} "
+            f"against it overstates accuracy by any error the correction missed; "
+            f"compare other models against it, or re-check this one's misses by eye.")
+
+
 def to_dict(truth: BenchmarkTruth) -> dict[str, Any]:
     return {
         "report_id": str(truth.report_id),
@@ -216,6 +247,8 @@ def to_dict(truth: BenchmarkTruth) -> dict[str, Any]:
         "fingerprint": truth.fingerprint,
         "verified": truth.verified,
         "source": truth.source,
+        "drafted_by_model": truth.drafted_by_model,
+        "drafted_by_config": truth.drafted_by_config,
         "note": truth.note,
         "created_by": truth.created_by,
         "created_at": truth.created_at.isoformat() if truth.created_at else None,
@@ -234,6 +267,8 @@ def summary(truth: BenchmarkTruth) -> dict[str, Any]:
                       for row in ((truth.accounts or {}).get("accounts") or [])),
         "verified": truth.verified,
         "source": truth.source,
+        "drafted_by_model": truth.drafted_by_model,
+        "drafted_by_config": truth.drafted_by_config,
         "fingerprint": truth.fingerprint,
         "updated_at": truth.updated_at.isoformat() if truth.updated_at else None,
     }

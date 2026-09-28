@@ -106,6 +106,10 @@ export function jobSummary(job) {
   if (isJobRunning(job.status)) return 'Running…'
   const result = job.result
   if (!result) return 'Done'
+  if (job.operation === 'draft_truth_batch') {
+    return `Drafted ${result.accounts_drafted} accounts · ${result.months_drafted} months `
+      + '— correct and verify'
+  }
   return `${result.accounts?.matched ?? '?'}/${result.accounts?.asked ?? '?'} matched · `
     + `fields ${pct(result.field_accuracy)} · payments ${pct(result.payment_history)}`
 }
@@ -135,7 +139,8 @@ export function truthStatus(summary) {
       detail: 'Save the values this batch actually prints before scoring a model against them.',
     }
   }
-  const drafted = summary.source === 'drafted_from_batch'
+  const drafted = DRAFT_SOURCES.includes(summary.source)
+  const by = summary.drafted_by_model ? ` by ${modelLabel(summary.drafted_by_model)}` : ''
   if (!summary.verified) {
     return {
       state: 'unverified',
@@ -143,16 +148,26 @@ export function truthStatus(summary) {
       label: drafted ? 'Draft — not verified' : 'Saved — not verified',
       canBenchmark: false,
       detail: drafted
-        ? 'Prefilled from the model\'s own extraction. Correct it against the document and '
-          + 'verify it — scoring a model against its own output measures nothing.'
+        ? `Prefilled${by} from the model's own read. Correct every field against the document `
+          + 'and verify it — scoring a model against its own output measures nothing.'
         : 'Check these values against the document, then verify. A benchmark against '
           + 'unverified truth is refused.',
     }
   }
   return {
     state: 'verified', tone: 'green', label: 'Verified', canBenchmark: true,
-    detail: 'Stored once and referenced by every run — nothing to re-enter.',
+    detail: summary.drafted_by_model
+      ? `Stored once and referenced by every run. Drafted${by} and corrected by hand, so a `
+        + `${modelLabel(summary.drafted_by_model)} benchmark against it is flagged.`
+      : 'Stored once and referenced by every run — nothing to re-enter.',
   }
+}
+
+const DRAFT_SOURCES = ['drafted_from_batch', 'drafted_from_model']
+
+/** "Luna" for "gpt-5.6-luna"; the raw id for anything not in the configs. */
+export function modelLabel(model) {
+  return BENCHMARK_CONFIGS.find(c => c.model === model)?.label || model || ''
 }
 
 /** "4 accounts · 36 months", for the truth panel. */
@@ -204,4 +219,82 @@ export function parseTruthText(text) {
     return { error: `Account ${unnamed + 1} has no creditor_name.` }
   }
   return { accounts }
+}
+
+
+// ── Getting truth when there is none ────────────────────────────────────
+
+/**
+ * What the truth panel should offer next, and why.
+ *
+ * The case this exists for: a batch with no stored truth AND nothing banked.
+ * The free draft needs a banked extraction, the benchmark needs verified
+ * truth, and a blank editor with a Save button reads as the obvious next step
+ * — which means typing four accounts of payment grid into JSON on a phone. The
+ * page says what is missing instead, and offers the paid draft that fills it.
+ */
+export function truthNextStep({ summary, banked }) {
+  if (summary) {
+    return summary.verified
+      ? { step: 'ready', title: 'Ready to benchmark' }
+      : { step: 'correct-and-verify', title: 'Correct it, then verify' }
+  }
+  if (banked) {
+    return {
+      step: 'draft-from-banked',
+      title: 'Draft from the banked extraction',
+      detail: 'Free: this batch is already banked, so the draft reuses that read.',
+    }
+  }
+  return {
+    step: 'draft-with-model',
+    title: 'Nothing to draft from yet',
+    detail: 'This batch has no banked extraction, so there is nothing free to prefill truth '
+      + 'from. Draft it with one paid model read: it banks nothing, is stored unverified, '
+      + 'and no benchmark will use it until you have corrected it against the document '
+      + 'and verified it.',
+  }
+}
+
+/** The request body for a paid truth draft. */
+export function truthDraftRequest({ reportId, batchId, config, idempotencyKey }) {
+  const body = { report_id: reportId, batch_id: batchId, config }
+  if (idempotencyKey) body.idempotency_key = idempotencyKey
+  if (configFor(config)?.expensive) body.acknowledge_expensive = true
+  return body
+}
+
+/** What the confirmation says before a paid draft. */
+export function draftConfirmationFor(letter, batchId) {
+  const config = configFor(letter)
+  if (!config) return null
+  const cost = 'This makes exactly one paid model call and banks nothing. The result is '
+    + 'a draft: you correct and verify it before any benchmark will use it, and a '
+    + `${config.label} benchmark against it will be flagged as scoring ${config.label} `
+    + 'against its own read.'
+  return {
+    title: `Draft ${batchId} truth with ${config.label}?`,
+    body: config.expensive
+      ? `${cost} ${config.label} is the expensive escalation model — only run it deliberately.`
+      : cost,
+    requiresAck: config.expensive,
+    confirmLabel: config.expensive ? `Yes, draft with ${config.label}` : `Draft with ${config.label}`,
+  }
+}
+
+/** A draft job for this batch that has not finished, if any. */
+export function draftInFlight(jobs, batchId) {
+  return (jobs || []).find(j => j.operation === 'draft_truth_batch'
+    && j.request?.batch_id === batchId && isJobRunning(j.status)) || null
+}
+
+/**
+ * One key per confirmation, so a double tap on a paid button reuses the
+ * first job instead of buying a second one. The server treats a repeated key
+ * as the same request.
+ */
+export function newIdempotencyKey(kind, batchId, config) {
+  const random = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  return `${kind}-${batchId}-${config}-${random}`
 }

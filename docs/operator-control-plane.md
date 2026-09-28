@@ -193,6 +193,32 @@ POST   /api/operator/reports/{id}/batches/{batch}/truth/verify
 POST   /api/operator/reports/{id}/batches/{batch}/truth/draft
 ```
 
+### Getting truth when nothing is banked
+
+`draft` needs a banked extraction, and a report can have a banked Stage-1 index
+with no banked Stage-2 batch — benchmarks bank nothing by design. For that case:
+
+```
+POST /api/operator/jobs/draft-truth
+{"report_id": "<uuid>", "batch_id": "b0", "config": "A", "idempotency_key": "…"}
+```
+
+One paid model read of one batch under one config (Sol needs
+`acknowledge_expensive`), through `extract_batch` so **nothing is banked**. The
+result is stored as truth with `verified: false`, `source: "drafted_from_model"`
+and the drafting model recorded. It is refused — before any money moves — when
+truth is already stored for the batch, and a correction saved while the model
+was reading wins over the draft. The job result carries counts, never values.
+
+The drafting model stays on record through corrections (`drafted_by_model`).
+Correcting a prefilled draft anchors on it: an error the reviewer misses
+survives, and it is that model's error. So a benchmark of the same model
+against truth it drafted carries an `anchoring_warning`; the other models'
+benchmarks do not.
+
+The free `draft` from a banked batch follows the same rule now: it refuses to
+overwrite stored truth rather than discarding someone's corrections.
+
 Three rules the store enforces rather than documents:
 
 - **Unverified truth cannot be benchmarked against** (409). `draft` prefills a
@@ -297,16 +323,23 @@ internal use. Shows recent reports, extraction state, the banked index, the
 batch plan, banked batches and recent jobs.
 
 Per batch it shows that batch's truth — whether it exists, how many accounts and
-months it holds, its short fingerprint, and whether it is verified — with
-buttons to draft it from the banked extraction, correct it in place, and verify
-it. The benchmark buttons are disabled until the truth is verified, and say why,
+months it holds, its short fingerprint, whether it is verified, and which model
+drafted it — with buttons to correct it in place and verify it. With no truth
+stored it says what is missing rather than offering a blank editor: "Draft from
+banked (free)" when the batch is banked, otherwise "Nothing to draft from yet"
+and one paid "Draft with Luna/Terra/Sol" per config behind the same explicit
+confirmation as a benchmark. Hand entry stays available, demoted. The benchmark buttons are disabled until the truth is verified, and say why,
 rather than letting a tap on a paid button come back 409. Once verified, Luna,
 Terra and Sol are each one tap behind an explicit confirmation, with Sol's
 saying why it is different; each run references the stored truth and re-enters
 nothing.
 
 Results render matched accounts, field/payment/provenance accuracy, the gate,
-tokens, latency, cost and every payment-history miss.
+tokens, latency, cost, every payment-history miss, and the anchoring warning
+when a model is scored against truth it drafted.
+
+Every paid confirmation carries its own idempotency key, so a double tap on the
+confirm button reuses the first job instead of buying a second one.
 
 Reaching it needs a signed-in session whose verified token is allowlisted (see
 Auth); no machine token is involved, and a browser build never contains one.

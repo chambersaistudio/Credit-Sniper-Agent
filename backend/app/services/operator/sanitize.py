@@ -104,6 +104,8 @@ _SAFE_MESSAGES = {
                        "document. Confirm it before scoring a model against it.",
     "TruthChanged": "The stored benchmark truth changed after this job was queued. Queue a new "
                     "job so the result matches the truth it is scored against.",
+    "TruthExists": "Benchmark truth is already stored for this batch. Correct it instead of "
+                   "drafting over it.",
 }
 _GENERIC = "The operation failed. See the server log for details."
 

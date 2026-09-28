@@ -211,12 +211,14 @@ async def test_the_operator_surface_exposes_no_general_purpose_capability(client
     listed = {op["operation"] for op in (await client.get(
         "/api/operator/operations", headers=AGENT_HEADERS)).json()}
     assert listed == set(OPERATIONS)
-    assert listed == {"benchmark_batch", "diagnose_report", "inspect_checkpoint",
-                      "batch_plan", "extraction_status"}
+    assert listed == {"benchmark_batch", "draft_truth_batch", "diagnose_report",
+                      "inspect_checkpoint", "batch_plan", "extraction_status"}
 
 
-async def test_rate_limiting_applies_per_principal(client, operator_env):
-    operator_env.operator_rate_limit_per_minute = 5
+async def test_rate_limiting_applies_per_principal(client, operator_env, monkeypatch):
+    # monkeypatch, not assignment: the settings object is shared, and a limit of
+    # 5 left behind makes whichever test runs next fail with an unexplained 429.
+    monkeypatch.setattr(operator_env, "operator_rate_limit_per_minute", 5)
     for _ in range(5):
         assert (await client.get("/api/operator/whoami", headers=AGENT_HEADERS)).status_code == 200
     assert (await client.get("/api/operator/whoami", headers=AGENT_HEADERS)).status_code == 429

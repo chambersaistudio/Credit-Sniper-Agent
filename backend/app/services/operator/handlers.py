@@ -94,6 +94,8 @@ async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> 
         raise _failure_as_exception(failure)
 
     card = score_batch(batch_id, config, result.accounts, truth_accounts, result.quality)
+    truth_row = (None if request.get("truth_inline") else await truth_service.get(
+        db, report_id, batch_id, request.get("truth_label", DEFAULT_LABEL)))
 
     # Re-read the row to prove nothing was written by this run.
     await db.refresh(report)
@@ -105,6 +107,9 @@ async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> 
         "config": config,
         "truth_label": request.get("truth_label", DEFAULT_LABEL),
         "truth_fingerprint": request.get("truth_fingerprint"),
+        "truth_drafted_by_model": truth_row.drafted_by_model if truth_row else None,
+        # Set when this model is being scored against truth it drafted itself.
+        "anchoring_warning": truth_service.anchoring_note(truth_row, result.model),
         "model": result.model,
         "detail": detail,
         "plan": plan.to_dict(),
@@ -131,6 +136,87 @@ async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> 
         ],
         "banked_batches_unchanged": banked_before == banked_after,
         "banked_batches": sorted((report.extraction_checkpoint or {}).get("batches") or {}),
+    }
+
+
+@handler("draft_truth_batch")
+async def draft_truth_batch(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    """Read ONE batch under ONE model and store it as an UNVERIFIED truth draft.
+
+    For a batch with nothing banked: the free draft needs a banked extraction,
+    and the benchmark needs verified truth, so without this the only way in is
+    to type the accounts by hand.
+
+    Structurally the same guarantees as the benchmark — `extract_batch`, never
+    `run_report_batch`; the banked batches hashed before and after — plus two
+    of its own:
+
+    * it refuses to overwrite stored truth, checked BEFORE the model call so a
+      refusal costs nothing, and again before writing so a correction saved
+      while the model was reading is never discarded
+    * the result is stored `verified=False` with the drafting model recorded,
+      so the benchmark refuses it until a human has checked it against the
+      document, and afterwards flags a benchmark of this same model
+    """
+    report_id = request["report_id"]
+    batch_id = request["batch_id"]
+    config = request["config"]
+    label = request.get("truth_label", DEFAULT_LABEL)
+
+    if await truth_service.get(db, report_id, batch_id, label) is not None:
+        raise truth_service.TruthExists(f"truth already stored for {batch_id}")
+
+    model, detail = config_model(config)
+    report = await reads.get_report(db, report_id)
+    plans = batch_plans(report, batch_size=request.get("batch_size", 4),
+                        context_pages=request.get("context_pages", 1))
+    plan = next((p for p in plans if p.batch_id == batch_id), None)
+    if plan is None:
+        raise LookupError(f"no batch {batch_id!r}; this report has {[p.batch_id for p in plans]}")
+
+    banked_before = _banked_digest(report)
+    document = await get_storage().get(report.storage_key)
+    result = await extract_batch(document, plan, model=model, detail=detail, context={
+        "operator_job": str(job.id), "truth_draft_config": config,
+    })
+    if result.batch is None:
+        raise _failure_as_exception(result.failure)
+
+    drafted = truth_service.draft_from_batch({"batch": result.batch.model_dump(mode="json")})
+
+    # Second check, now that the paid read is done: someone may have saved
+    # truth by hand while the model was reading. Theirs wins.
+    if await truth_service.get(db, report_id, batch_id, label) is not None:
+        raise truth_service.TruthExists(
+            f"truth for {batch_id} was saved while the draft was being read; kept it")
+
+    row = await truth_service.upsert(
+        db, report_id=report.id, batch_id=batch_id, accounts=drafted,
+        created_by=job.requested_by or "operator", label=label, verified=False,
+        source="drafted_from_model",
+        note=f"Drafted by {result.model} ({config}). Correct every field against the document, "
+             f"then verify. Not truth until then.",
+        drafted_by_model=result.model, drafted_by_config=config,
+    )
+    # Not committed here: the runner commits it with the job, or rolls it back
+    # if the job fails (including a broken call budget found after this returns).
+    await db.refresh(report)
+    rows = drafted["accounts"]
+    # Counts, not values: the values live in the truth store, fetched only
+    # when someone opens the editor to correct them.
+    return {
+        "report_id": str(report.id),
+        "batch_id": batch_id,
+        "config": config,
+        "model": result.model,
+        "detail": detail,
+        "truth_label": label,
+        "truth_fingerprint": row.fingerprint,
+        "verified": False,
+        "accounts_drafted": len(rows),
+        "months_drafted": sum(len(r.get("payment_history") or {}) for r in rows),
+        "gate": result.quality.to_dict(),
+        "banked_batches_unchanged": banked_before == _banked_digest(report),
     }
 
 
