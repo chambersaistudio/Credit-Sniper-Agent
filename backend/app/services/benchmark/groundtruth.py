@@ -37,6 +37,14 @@ DATE_FIELDS = frozenset({
 })
 INQUIRY_FIELDS: tuple[str, ...] = ("inquiry_date", "inquiry_type", "inquiry_category", "business_type")
 
+# Experian uses a hash glyph for "Current / Terms met" in payment-history
+# grids. Model-assisted truth drafting may render that same legend state as a
+# check mark. Those glyphs are representational aliases, not different credit
+# states. Keep this intentionally narrow: ND, '-', CLS, CO, C, VS, and late
+# codes remain distinct and are never collapsed here.
+_CURRENT_TERMS_MET_GLYPHS = frozenset({"#", "✓", "✔"})
+_CURRENT_TERMS_MET_CANONICAL = "current / terms met"
+
 
 @dataclass
 class GroundTruth:
@@ -100,6 +108,8 @@ def normalize_text(value: Any) -> str | None:
     if value is None:
         return None
     text = re.sub(r"\s+", " ", str(value)).strip().lower()
+    if text in _CURRENT_TERMS_MET_GLYPHS:
+        return _CURRENT_TERMS_MET_CANONICAL
     return text or None
 
 
