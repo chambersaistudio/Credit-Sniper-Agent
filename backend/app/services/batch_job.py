@@ -25,11 +25,14 @@ from app.services.checkpoint_claim import (
     DEFAULT_LEASE_SECONDS, BatchAlreadyRunning, SlotAlreadyRunning, batch_slot,
     drop_claim, lock_report, release, take_claim,
 )
-from app.services.document_extraction.batch_quality import BatchQuality, assess_batch
+from app.services.document_extraction.batch_quality import (
+    BatchQuality, assess_batch, match_accounts,
+)
 from app.services.document_extraction.batch_schema import TradelineBatch
 from app.services.document_extraction.batching import (
     DEFAULT_BATCH_SIZE, DEFAULT_CONTEXT_PAGES, BatchPlan, plan_batches,
 )
+from app.services.document_extraction.index_quality import identity_key
 from app.services.document_extraction.index_schema import ReportIndex
 from app.services.document_extraction.page_bundle import (
     PageBundle, RemapReport, build_bundle, remap_tradelines, select_pages,
@@ -368,7 +371,21 @@ async def repair_report_account(
             await db.commit()
             raise ValueError("the banked batch account count changed during repair")
 
-        accounts[account_position] = replacement
+        asked = {identity_key(t): t.creditor_name for t in current_plan.tradelines}
+        pairs, unexpected, drift = match_accounts(asked, accounts, current_plan)
+        target_key = identity_key(current_plan.tradelines[account_position])
+        existing_account = pairs.get(target_key)
+        if existing_account is None or unexpected or drift:
+            report.extraction_checkpoint = checkpoint
+            await db.commit()
+            raise ValueError("the stored batch can no longer be matched safely to its index plan")
+        positions = [i for i, account in enumerate(accounts) if account is existing_account]
+        if len(positions) != 1:
+            report.extraction_checkpoint = checkpoint
+            await db.commit()
+            raise ValueError("could not identify exactly one stored account to replace")
+
+        accounts[positions[0]] = replacement
         updated = TradelineBatch(
             accounts=accounts,
             missing_tradelines=list(stored.missing_tradelines or []),
