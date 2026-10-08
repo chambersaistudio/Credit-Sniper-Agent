@@ -211,8 +211,11 @@ async def test_the_operator_surface_exposes_no_general_purpose_capability(client
     listed = {op["operation"] for op in (await client.get(
         "/api/operator/operations", headers=AGENT_HEADERS)).json()}
     assert listed == set(OPERATIONS)
-    assert listed == {"benchmark_batch", "draft_truth_batch", "diagnose_report",
-                      "inspect_checkpoint", "batch_plan", "extraction_status"}
+    assert listed == {
+        "index_report", "bank_batch", "merge_scaled_report", "finalize_scaled_report",
+        "benchmark_batch", "draft_truth_batch", "diagnose_report",
+        "inspect_checkpoint", "batch_plan", "extraction_status",
+    }
 
 
 async def test_rate_limiting_applies_per_principal(client, operator_env, monkeypatch):
@@ -277,6 +280,16 @@ async def test_no_consumer_identity_reaches_an_operator_response(client, operato
             assert pii not in body, f"{pii!r} leaked from {path}"
         assert "storage_key" not in body
         assert "raw_text" not in body
+
+
+async def test_scaled_finalizer_requires_explicit_sol_ack(client, operator_env):
+    response = await client.post(
+        "/api/operator/jobs/finalize-scaled-report",
+        headers=AGENT_HEADERS,
+        json={"report_id": str(uuid.uuid4())},
+    )
+    assert response.status_code == 400
+    assert "Sol" in response.json()["detail"]
 
 
 # ── Queueing a benchmark ────────────────────────────────────────────────

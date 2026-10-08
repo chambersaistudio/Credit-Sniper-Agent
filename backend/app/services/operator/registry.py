@@ -70,7 +70,18 @@ OPERATIONS: dict[str, Operation] = {
     ),
     "merge_scaled_report": Operation(
         name="merge_scaled_report",
-        summary="Deterministically merge a complete banked index and all banked batches. No model call.",
+        summary="Deterministically merge a complete banked index and all banked batches. "
+                "Invalidates any prior audit and leaves the report NEEDS_AUDIT.",
+    ),
+    "finalize_scaled_report": Operation(
+        name="finalize_scaled_report",
+        summary="Independently audit a merged scaled extraction against the original PDF, "
+                "then run the existing deterministic reconciliation/persistence path.",
+        paid=True,
+        max_model_calls=1,
+        models=("gpt-5.6-sol",),
+        requires_ack=True,
+        resumable=False,
     ),
     "benchmark_batch": Operation(
         name="benchmark_batch",

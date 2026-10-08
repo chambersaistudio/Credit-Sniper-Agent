@@ -116,6 +116,122 @@ async def operator_diagnosis(
 
 # ── Jobs ────────────────────────────────────────────────────────────────
 
+class IndexReportRequest(BaseModel):
+    report_id: str
+    expected_tradelines: int | None = Field(default=None, ge=1, le=200)
+    force: bool = False
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+class BankBatchRequest(BaseModel):
+    report_id: str
+    batch_id: str = "b0"
+    batch_size: int = Field(default=4, ge=1, le=8)
+    context_pages: int = Field(default=1, ge=0, le=3)
+    force: bool = False
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+class ReportJobRequest(BaseModel):
+    report_id: str
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+class FinalizeScaledRequest(ReportJobRequest):
+    acknowledge_expensive: bool = False
+
+
+async def _queue_simple_job(
+    db: AsyncSession, principal: OperatorPrincipal, *,
+    operation: str, request: dict[str, Any], report_id, idempotency_key: str | None,
+    paid: bool = False,
+):
+    if paid:
+        check_paid_rate_limit(principal)
+    try:
+        job, created = await enqueue(
+            db, operation=operation, request=request,
+            requested_by=principal.audit_name, report_id=report_id,
+            idempotency_key=idempotency_key,
+        )
+    except DuplicateRequest as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    await db.commit()
+    return {**job_to_dict(job), "created": created,
+            "max_model_calls": job.max_model_calls}
+
+
+@router.post("/jobs/index-report", response_model=dict[str, Any], status_code=202)
+async def queue_index_report(
+    body: IndexReportRequest,
+    principal: OperatorPrincipal = Depends(operator_request),
+    db: AsyncSession = Depends(get_db),
+):
+    report = await _report(db, body.report_id)
+    return await _queue_simple_job(
+        db, principal, operation="index_report",
+        request=body.model_dump(exclude={"idempotency_key"}),
+        report_id=report.id, idempotency_key=body.idempotency_key, paid=True,
+    )
+
+
+@router.post("/jobs/bank-batch", response_model=dict[str, Any], status_code=202)
+async def queue_bank_batch(
+    body: BankBatchRequest,
+    principal: OperatorPrincipal = Depends(operator_request),
+    db: AsyncSession = Depends(get_db),
+):
+    report = await _report(db, body.report_id)
+    _require_batch(report, body.batch_id, body.batch_size, body.context_pages)
+    return await _queue_simple_job(
+        db, principal, operation="bank_batch",
+        request=body.model_dump(exclude={"idempotency_key"}),
+        report_id=report.id, idempotency_key=body.idempotency_key, paid=True,
+    )
+
+
+@router.post("/jobs/merge-scaled-report", response_model=dict[str, Any], status_code=202)
+async def queue_merge_scaled_report(
+    body: ReportJobRequest,
+    principal: OperatorPrincipal = Depends(operator_request),
+    db: AsyncSession = Depends(get_db),
+):
+    report = await _report(db, body.report_id)
+    return await _queue_simple_job(
+        db, principal, operation="merge_scaled_report",
+        request={"report_id": body.report_id},
+        report_id=report.id, idempotency_key=body.idempotency_key,
+    )
+
+
+@router.post("/jobs/finalize-scaled-report", response_model=dict[str, Any], status_code=202)
+async def queue_finalize_scaled_report(
+    body: FinalizeScaledRequest,
+    principal: OperatorPrincipal = Depends(operator_request),
+    db: AsyncSession = Depends(get_db),
+):
+    if not body.acknowledge_expensive:
+        raise HTTPException(
+            status_code=400,
+            detail="Scaled finalization uses the Sol document auditor. "
+                   "Re-send with acknowledge_expensive=true to confirm.",
+        )
+    report = await _report(db, body.report_id)
+    checkpoint = report.extraction_checkpoint or {}
+    if not checkpoint.get("extraction") or not str(
+        checkpoint.get("extractor_model") or ""
+    ).startswith("scaled:"):
+        raise HTTPException(
+            status_code=409,
+            detail="This report does not have a merged scaled extraction to finalize.",
+        )
+    return await _queue_simple_job(
+        db, principal, operation="finalize_scaled_report",
+        request={"report_id": body.report_id},
+        report_id=report.id, idempotency_key=body.idempotency_key, paid=True,
+    )
+
+
 class TruthAccount(BaseModel):
     """One account's confirmed values, as the document prints them.
 

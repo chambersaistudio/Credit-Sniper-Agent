@@ -5,6 +5,7 @@ registers a DB sink at startup (see app/main.py); tests register none.
 """
 import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -31,6 +32,9 @@ class UsageRecord:
 
 UsageListener = Callable[[UsageRecord], Awaitable[None]]
 _listeners: list[UsageListener] = []
+_listener_override: ContextVar[tuple[UsageListener, ...] | None] = ContextVar(
+    "ai_usage_listener_override", default=None
+)
 
 
 def add_usage_listener(listener: UsageListener) -> None:
@@ -43,20 +47,17 @@ def clear_usage_listeners() -> None:
 
 @contextmanager
 def only_usage_listener(listener: UsageListener):
-    """Route usage records to `listener` alone for the duration of the block,
-    then restore whatever was listening before.
+    """Route usage records in THIS async context to `listener` alone.
 
-    The benchmark harness uses this: its token and cost numbers are
-    measurements of a candidate configuration and must not be written to the
-    application's usage table as if they were real work."""
-    saved = list(_listeners)
-    _listeners.clear()
-    _listeners.append(listener)
+    This used to clear the process-global listener list. An operator benchmark
+    or finalizer could therefore steal a concurrent consumer extraction's
+    usage event (and vice versa). ContextVar keeps the temporary meter scoped
+    to the job/task while normal application listeners keep working elsewhere."""
+    token = _listener_override.set((listener,))
     try:
         yield
     finally:
-        _listeners.clear()
-        _listeners.extend(saved)
+        _listener_override.reset(token)
 
 
 async def emit(record: UsageRecord) -> None:
@@ -65,7 +66,10 @@ async def emit(record: UsageRecord) -> None:
         record.task, record.tier, record.model, record.success, record.input_tokens,
         record.output_tokens, record.cache_read_tokens, record.estimated_cost_usd, record.latency_ms,
     )
-    for listener in _listeners:
+    listeners = _listener_override.get()
+    if listeners is None:
+        listeners = tuple(_listeners)
+    for listener in listeners:
         try:
             await listener(record)
         except Exception:

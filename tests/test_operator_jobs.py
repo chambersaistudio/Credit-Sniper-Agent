@@ -149,6 +149,44 @@ def test_importing_the_app_starts_no_operator_worker():
     assert result.stdout.strip() == "0"
 
 
+
+async def test_temporary_usage_meter_is_task_local_not_process_global():
+    """A benchmark/finalizer meter must not steal a concurrent consumer call."""
+    from app.services.ai.usage import (
+        UsageRecord, add_usage_listener, clear_usage_listeners, emit, only_usage_listener,
+    )
+
+    base_seen, private_seen = [], []
+
+    async def base(record):
+        base_seen.append(record.task)
+
+    async def private(record):
+        private_seen.append(record.task)
+
+    clear_usage_listeners()
+    add_usage_listener(base)
+    try:
+        async def metered_task():
+            with only_usage_listener(private):
+                await asyncio.sleep(0)
+                await emit(UsageRecord(
+                    task="operator", tier="x", provider="x", model="x", success=True
+                ))
+
+        async def consumer_task():
+            await asyncio.sleep(0)
+            await emit(UsageRecord(
+                task="consumer", tier="x", provider="x", model="x", success=True
+            ))
+
+        await asyncio.gather(metered_task(), consumer_task())
+        assert private_seen == ["operator"]
+        assert base_seen == ["consumer"]
+    finally:
+        clear_usage_listeners()
+
+
 # ── Queue behaviour ─────────────────────────────────────────────────────
 
 pytestmark_db = requires_db

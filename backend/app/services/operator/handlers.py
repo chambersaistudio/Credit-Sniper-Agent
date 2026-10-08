@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,8 @@ from app.models.operator_job import OperatorJob
 from app.services.batch_job import batch_plans, extract_batch, run_report_batch
 from app.services.benchmark.batch_scoring import score_batch
 from app.services.index_job import index_report
+from app.services.extraction_jobs import Stage, process_report
+from app.services.document_extraction import ExtractionStatus
 from app.services.operator import reads
 from app.services.operator import truth as truth_service
 from app.services.operator.truth import DEFAULT_LABEL
@@ -65,24 +68,96 @@ async def bank_batch(db: AsyncSession, job: OperatorJob, request: dict) -> dict[
     return result.to_dict()
 
 
+_AUDIT_CHECKPOINT_KEYS = (
+    "audit", "audit_done", "auditor_model", "audit_error", "audit_failure",
+)
+
+
 @handler("merge_scaled_report")
 async def merge_scaled_report(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    """Assemble Stage 1 + Stage 2, but never bless the merge as verified.
+
+    Replacing the extraction invalidates any audit of an older extraction.
+    The report is deliberately parked at NEEDS_AUDIT until the independent
+    finalizer reads the original PDF again.
+    """
     report = await reads.get_report(db, request["report_id"])
-    extraction = merge_scaled_checkpoint(report.extraction_checkpoint or {})
     checkpoint = dict(report.extraction_checkpoint or {})
-    report.extraction_checkpoint = {
+    extraction = merge_scaled_checkpoint(checkpoint)
+    for key in _AUDIT_CHECKPOINT_KEYS:
+        checkpoint.pop(key, None)
+    checkpoint = {
         **checkpoint,
         "extraction": extraction.model_dump(mode="json"),
         "extractor_model": scaled_model_label(checkpoint),
     }
+    report.extraction_checkpoint = checkpoint
+    report.extraction_status = ExtractionStatus.NEEDS_AUDIT.value
+    report.processing_stage = ExtractionStatus.NEEDS_AUDIT.value
+    report.processing_finished_at = datetime.now(timezone.utc)
+    report.processing_claimed_at = None
+    report.last_processing_error_class = None
     await db.flush()
     return {
         "report_id": str(report.id),
         "accounts": len(extraction.accounts),
         "inquiries": len(extraction.inquiries),
         "public_records": len(extraction.public_records),
-        "model": report.extraction_checkpoint["extractor_model"],
+        "model": checkpoint["extractor_model"],
         "merged": True,
+        "audit_required": True,
+    }
+
+
+@handler("finalize_scaled_report")
+async def finalize_scaled_report(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    """Run the existing independent PDF audit + deterministic reconciliation.
+
+    The production extraction worker already has the audited persistence path.
+    We claim this report for this job, resume at EXTRACTION_COMPLETE, and call
+    that same implementation. The operator runner's model-call meter wraps the
+    whole handler, so the Sol audit remains a one-call paid operation.
+    """
+    report = await reads.get_report(db, request["report_id"])
+    checkpoint = dict(report.extraction_checkpoint or {})
+    if not checkpoint.get("extraction"):
+        raise ValueError("scaled finalization requires a merged extraction")
+    if not str(checkpoint.get("extractor_model") or "").startswith("scaled:"):
+        raise ValueError("scaled finalization refuses a non-scaled extraction")
+
+    if checkpoint.get("audit_done"):
+        audit = checkpoint.get("audit") or {}
+        return {
+            "report_id": str(report.id),
+            "status": report.extraction_status,
+            "processing_stage": report.processing_stage,
+            "auditor_model": checkpoint.get("auditor_model"),
+            "audit_verified": audit.get("verified"),
+            "findings": len(audit.get("findings") or []),
+            "reused": True,
+        }
+
+    # Claim it ourselves so the ordinary background worker cannot race this
+    # explicit operator finalization after we commit the pending stage.
+    report.processing_stage = Stage.EXTRACTION_COMPLETE
+    report.processing_finished_at = None
+    report.processing_claimed_at = datetime.now(timezone.utc)
+    report.last_processing_error_class = None
+    await db.commit()
+
+    final_stage = await process_report(report.id)
+    # process_report used its own session; refresh this one from Postgres.
+    await db.refresh(report)
+    checkpoint = dict(report.extraction_checkpoint or {})
+    audit = checkpoint.get("audit") or {}
+    return {
+        "report_id": str(report.id),
+        "status": report.extraction_status,
+        "processing_stage": final_stage,
+        "auditor_model": checkpoint.get("auditor_model"),
+        "audit_verified": audit.get("verified"),
+        "findings": len(audit.get("findings") or []),
+        "reused": False,
     }
 
 @handler("benchmark_batch")
