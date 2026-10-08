@@ -304,7 +304,8 @@ have not found it properly.
 two disagree, that disagreement is the useful signal.
 - For inquiries, preserve the creditor and date exactly. Only say hard/soft when the document establishes it. \
 A printed "Business Type" is the company industry and belongs in `business_type`, not `inquiry_type`. \
-Record the page for each inquiry.\
+Capture the inquiry contact name/address/phone exactly when printed; these are low-volume inquiry facts, not \
+tradeline detail. Record the page for each inquiry.\
 - For public records, list only records the report actually shows. If it explicitly says there are no public \
 records, return an empty list.\
 - Summary metrics are short report-level values only (for example account counts, utilization or total debt) \

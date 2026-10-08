@@ -15,7 +15,7 @@ from app.services.document_extraction.batch_schema import TradelineBatch
 from app.services.document_extraction.batching import plan_batches
 from app.services.document_extraction.index_schema import ReportIndex
 from app.services.document_extraction.schema import (
-    CreditReportExtraction, ExtractedInquiry, PublicRecord, SummaryMetric,
+    ContactInfo, CreditReportExtraction, ExtractedInquiry, PublicRecord, SummaryMetric,
 )
 
 
@@ -83,7 +83,10 @@ def merge_scaled_checkpoint(checkpoint: dict[str, Any]) -> CreditReportExtractio
             inquiry_type=i.inquiry_type,
             inquiry_category=i.inquiry_category,
             business_type=i.business_type,
-            contact=None,
+            contact=(
+                ContactInfo(name=i.contact.name, address=i.contact.address, phone=i.contact.phone)
+                if i.contact else None
+            ),
             source_pages=i.source_pages,
         )
         for i in index.inquiries

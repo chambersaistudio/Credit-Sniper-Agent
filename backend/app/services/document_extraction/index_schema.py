@@ -46,6 +46,14 @@ class IndexedTradeline(BaseModel):
     )
 
 
+class IndexedContact(BaseModel):
+    """Low-volume contact details printed with an inquiry."""
+
+    name: str | None = None
+    address: str | None = None
+    phone: str | None = None
+
+
 class IndexedInquiry(BaseModel):
     """One inquiry, kept lightweight so Stage 1 remains cheap."""
 
@@ -59,6 +67,10 @@ class IndexedInquiry(BaseModel):
     )
     business_type: str | None = Field(
         description="The company industry/business type as printed; not the hard/soft classification"
+    )
+    contact: IndexedContact | None = Field(
+        default=None,
+        description="Inquiry contact name/address/phone exactly as printed, when present"
     )
     source_pages: list[int] = Field(default_factory=list)
 

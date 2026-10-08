@@ -451,4 +451,5 @@ def test_index_prompt_collects_inquiries_but_still_forbids_account_detail():
     assert "every inquiry" in lowered
     assert "public record" in lowered
     assert "business type" in lowered
+    assert "contact name/address/phone" in lowered
     assert "do not return tradeline balances" in lowered

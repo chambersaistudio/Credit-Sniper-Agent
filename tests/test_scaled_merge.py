@@ -5,7 +5,7 @@ from app.services.batch_job import plan_fingerprint
 from app.services.document_extraction.batch_schema import TradelineBatch
 from app.services.document_extraction.batching import plan_batches
 from app.services.document_extraction.index_schema import (
-    IndexedInquiry, IndexedSummaryMetric, IndexedTradeline, ReportIndex,
+    IndexedContact, IndexedInquiry, IndexedSummaryMetric, IndexedTradeline, ReportIndex,
 )
 from app.services.document_extraction.scaled_merge import (
     ScaledMergeError, merge_scaled_checkpoint,
@@ -21,7 +21,11 @@ def _index():
         inquiries=[IndexedInquiry(
             creditor_name="TEST BANK", inquiry_date="Sep 23, 2026",
             inquiry_type=None, inquiry_category="credit_application",
-            business_type="Bank Credit Cards", source_pages=[19],
+            business_type="Bank Credit Cards",
+            contact=IndexedContact(
+                name="TEST BANK", address="1 MAIN ST; TESTVILLE, IA 50000", phone="(800) 555-0100"
+            ),
+            source_pages=[19],
         )],
         public_records=[], tradeline_count=2, total_pages=20, unreadable_pages=[],
         tradelines=[
@@ -75,7 +79,8 @@ def test_stage3_merge_builds_the_existing_full_extraction_shape():
     assert merged.summary_metrics[0].value == "1"
     assert merged.inquiries[0].creditor_name == "TEST BANK"
     assert merged.inquiries[0].business_type == "Bank Credit Cards"
-    assert merged.inquiries[0].contact is None
+    assert merged.inquiries[0].contact.address == "1 MAIN ST; TESTVILLE, IA 50000"
+    assert merged.inquiries[0].contact.phone == "(800) 555-0100"
 
 
 def test_stage3_refuses_a_missing_batch():
