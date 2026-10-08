@@ -52,6 +52,26 @@ CONFIGS_REQUIRING_ACK = frozenset({"C"})
 
 
 OPERATIONS: dict[str, Operation] = {
+    "index_report": Operation(
+        name="index_report",
+        summary="Run or deliberately refresh the cheap Stage-1 index for one stored report.",
+        paid=True,
+        max_model_calls=1,
+        models=("gpt-5.6-luna",),
+        resumable=False,
+    ),
+    "bank_batch": Operation(
+        name="bank_batch",
+        summary="Read and bank one production Stage-2 tradeline batch with the validated Luna configuration.",
+        paid=True,
+        max_model_calls=1,
+        models=("gpt-5.6-luna",),
+        resumable=False,
+    ),
+    "merge_scaled_report": Operation(
+        name="merge_scaled_report",
+        summary="Deterministically merge a complete banked index and all banked batches. No model call.",
+    ),
     "benchmark_batch": Operation(
         name="benchmark_batch",
         summary="Read one batch under one model and score it against confirmed truth. "

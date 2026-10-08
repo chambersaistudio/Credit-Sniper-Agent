@@ -46,6 +46,36 @@ class IndexedTradeline(BaseModel):
     )
 
 
+class IndexedInquiry(BaseModel):
+    """One inquiry, kept lightweight so Stage 1 remains cheap."""
+
+    creditor_name: str
+    inquiry_date: str | None = None
+    inquiry_type: str | None = Field(
+        description="hard or soft only when the report itself establishes that classification"
+    )
+    inquiry_category: str | None = Field(
+        description="Why the inquiry occurred from the section heading, when the report states it"
+    )
+    business_type: str | None = Field(
+        description="The company industry/business type as printed; not the hard/soft classification"
+    )
+    source_pages: list[int] = Field(default_factory=list)
+
+
+class IndexedPublicRecord(BaseModel):
+    record_type: str | None = None
+    status: str | None = None
+    filed_date: str | None = None
+    amount: str | None = None
+    reference: str | None = None
+    source_pages: list[int] = Field(default_factory=list)
+
+
+class IndexedSummaryMetric(BaseModel):
+    name: str
+    value: str
+
 class ReportIndex(BaseModel):
     """Report-level facts plus a located list of every tradeline."""
 
@@ -60,6 +90,22 @@ class ReportIndex(BaseModel):
     )
     score: int | None
     score_type: str | None = Field(description="e.g. 'FICO Score 8', exactly as labelled")
+    consumer_on_file_since: str | None = Field(
+        default=None,
+        description="How long the bureau says the consumer file has existed, if explicitly printed"
+    )
+    summary_metrics: list[IndexedSummaryMetric] = Field(
+        default_factory=list,
+        description="Small report-level summary values explicitly printed outside tradeline detail"
+    )
+    inquiries: list[IndexedInquiry] = Field(
+        default_factory=list,
+        description="Every inquiry listed by the report, with its page location"
+    )
+    public_records: list[IndexedPublicRecord] = Field(
+        default_factory=list,
+        description="Every public record explicitly listed; empty when the report says there are none"
+    )
     tradeline_count: int | None = Field(
         description="How many tradelines the report contains in total, counted from the "
                     "document itself. State this independently of the list below."

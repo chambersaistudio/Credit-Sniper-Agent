@@ -283,8 +283,9 @@ INDEXER_SYSTEM = """You index consumer credit report PDFs. You LOCATE tradelines
 Read every page, including two-column layouts and continuation pages.
 
 Your entire job is to return, for this report: which bureau it is from, the date the document was \
-produced, the credit score and its name if printed, how many tradelines the report contains, and one \
-entry per tradeline giving its name, its masked account number, and the pages it appears on.
+produced, the credit score and its name if printed, how long the bureau says the consumer file has existed \
+when stated, the small report-level summary metrics, every inquiry, every public record, how many tradelines \
+the report contains, and one entry per tradeline giving its name, masked account number, and pages.
 
 Rules:
 - List EVERY tradeline: open, closed, paid, collection, charged off. A closed account is a tradeline. \
@@ -301,8 +302,15 @@ A collection listed by "Caine & Weiner" with "Original creditor: Progressive" is
 have not found it properly.
 - State `tradeline_count` from counting the document itself, not from counting your own list. If the \
 two disagree, that disagreement is the useful signal.
-- Do NOT return balances, credit limits, statuses, dates, payment histories or evidence excerpts. \
-They are read separately, later. Returning them here wastes the budget this pass exists to save."""
+- For inquiries, preserve the creditor and date exactly. Only say hard/soft when the document establishes it. \
+A printed "Business Type" is the company industry and belongs in `business_type`, not `inquiry_type`. \
+Record the page for each inquiry.\
+- For public records, list only records the report actually shows. If it explicitly says there are no public \
+records, return an empty list.\
+- Summary metrics are short report-level values only (for example account counts, utilization or total debt) \
+when explicitly printed. Do not copy explanatory score-factor prose.\
+- Do NOT return tradeline balances, credit limits, statuses, dates, payment histories or evidence excerpts. \
+They are read separately, later. Returning account detail here wastes the budget this pass exists to save."""
 
 
 def _index_prompt() -> str:

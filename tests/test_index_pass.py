@@ -434,3 +434,21 @@ class TestIndexIdempotency:
         result = await index_report(report_id, expected_tradelines=15)
         assert not result.reused, "a failing index must not be reused"
         assert len(provider.calls) == 1
+
+
+def test_index_schema_carries_low_volume_report_extras_without_tradeline_detail():
+    index = golden_index()
+    assert index.inquiries == []
+    assert index.public_records == []
+    assert index.summary_metrics == []
+    assert index.consumer_on_file_since is None
+
+
+def test_index_prompt_collects_inquiries_but_still_forbids_account_detail():
+    from app.services.document_extraction.pipeline import INDEXER_SYSTEM
+
+    lowered = INDEXER_SYSTEM.lower()
+    assert "every inquiry" in lowered
+    assert "public record" in lowered
+    assert "business type" in lowered
+    assert "do not return tradeline balances" in lowered

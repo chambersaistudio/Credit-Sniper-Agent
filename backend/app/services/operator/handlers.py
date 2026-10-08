@@ -17,17 +17,73 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.credit_report import CreditReport
 from app.models.operator_job import OperatorJob
-from app.services.batch_job import batch_plans, extract_batch
+from app.services.batch_job import batch_plans, extract_batch, run_report_batch
 from app.services.benchmark.batch_scoring import score_batch
+from app.services.index_job import index_report
 from app.services.operator import reads
 from app.services.operator import truth as truth_service
 from app.services.operator.truth import DEFAULT_LABEL
+from app.services.document_extraction.scaled_merge import (
+    merge_scaled_checkpoint, scaled_model_label,
+)
 from app.services.operator.jobs import handler
 from app.services.operator.registry import config_model
 from app.services.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
+
+@handler("index_report")
+async def index_report_job(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    result = await index_report(
+        request["report_id"],
+        expected_tradelines=request.get("expected_tradelines"),
+        force=bool(request.get("force", False)),
+    )
+    if result.index is None:
+        raise _failure_as_exception(result.failure)
+    if not result.quality.ok:
+        raise ValueError("; ".join(result.quality.reasons))
+    return result.to_dict()
+
+
+@handler("bank_batch")
+async def bank_batch(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    result = await run_report_batch(
+        request["report_id"],
+        request["batch_id"],
+        batch_size=request.get("batch_size", 4),
+        context_pages=request.get("context_pages", 1),
+        force=bool(request.get("force", False)),
+        model="gpt-5.6-luna",
+        detail="high",
+    )
+    if result.batch is None:
+        raise _failure_as_exception(result.failure)
+    if not result.quality.ok:
+        raise ValueError("; ".join(result.quality.reasons))
+    return result.to_dict()
+
+
+@handler("merge_scaled_report")
+async def merge_scaled_report(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    report = await reads.get_report(db, request["report_id"])
+    extraction = merge_scaled_checkpoint(report.extraction_checkpoint or {})
+    checkpoint = dict(report.extraction_checkpoint or {})
+    report.extraction_checkpoint = {
+        **checkpoint,
+        "extraction": extraction.model_dump(mode="json"),
+        "extractor_model": scaled_model_label(checkpoint),
+    }
+    await db.flush()
+    return {
+        "report_id": str(report.id),
+        "accounts": len(extraction.accounts),
+        "inquiries": len(extraction.inquiries),
+        "public_records": len(extraction.public_records),
+        "model": report.extraction_checkpoint["extractor_model"],
+        "merged": True,
+    }
 
 @handler("benchmark_batch")
 async def benchmark_batch(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
