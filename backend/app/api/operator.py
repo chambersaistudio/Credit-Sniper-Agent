@@ -132,6 +132,13 @@ class BankBatchRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 
+class RepairAccountRequest(BaseModel):
+    report_id: str
+    batch_id: str
+    account_position: int = Field(ge=0, le=7)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
 class ReportJobRequest(BaseModel):
     report_id: str
     idempotency_key: str | None = Field(default=None, max_length=200)
@@ -185,6 +192,21 @@ async def queue_bank_batch(
     _require_batch(report, body.batch_id, body.batch_size, body.context_pages)
     return await _queue_simple_job(
         db, principal, operation="bank_batch",
+        request=body.model_dump(exclude={"idempotency_key"}),
+        report_id=report.id, idempotency_key=body.idempotency_key, paid=True,
+    )
+
+
+@router.post("/jobs/repair-account", response_model=dict[str, Any], status_code=202)
+async def queue_repair_account(
+    body: RepairAccountRequest,
+    principal: OperatorPrincipal = Depends(operator_request),
+    db: AsyncSession = Depends(get_db),
+):
+    report = await _report(db, body.report_id)
+    _require_batch(report, body.batch_id, 4, 1)
+    return await _queue_simple_job(
+        db, principal, operation="repair_account",
         request=body.model_dump(exclude={"idempotency_key"}),
         report_id=report.id, idempotency_key=body.idempotency_key, paid=True,
     )
