@@ -32,7 +32,7 @@ def _account_key(creditor_name, account_number, original_creditor) -> tuple[str,
             _norm(original_creditor))
 
 
-def _match(asked: dict, accounts: list, plan) -> tuple[dict, list[str], list[str]]:
+def match_accounts(asked: dict, accounts: list, plan) -> tuple[dict, list[str], list[str]]:
     """Pair returned accounts with the tradelines the batch asked for.
 
     Matched in tiers, strongest identity first, because the two reads can
@@ -137,7 +137,7 @@ def assess_batch(batch, plan, bundle, remap: RemapReport | None = None) -> Batch
         return BatchQuality(ok=False, asked=len(asked), returned=0, matched=0,
                             reasons=["No batch was produced."])
 
-    returned_keys, unexpected, drift = _match(asked, accounts, plan)
+    returned_keys, unexpected, drift = match_accounts(asked, accounts, plan)
     missing = [name for key, name in asked.items() if key not in returned_keys]
     reasons.extend(drift)
     # The model saying so itself is the honest failure, and is reported as
