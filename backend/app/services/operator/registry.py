@@ -68,6 +68,15 @@ OPERATIONS: dict[str, Operation] = {
         models=("gpt-5.6-luna",),
         resumable=False,
     ),
+    "repair_account": Operation(
+        name="repair_account",
+        summary="Surgically re-read one account on only its indexed source pages "
+                "and replace that account inside its banked Stage-2 batch.",
+        paid=True,
+        max_model_calls=1,
+        models=("gpt-5.6-luna",),
+        resumable=False,
+    ),
     "merge_scaled_report": Operation(
         name="merge_scaled_report",
         summary="Deterministically merge a complete banked index and all banked batches. "
