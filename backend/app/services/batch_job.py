@@ -32,7 +32,7 @@ from app.services.document_extraction.batching import (
 )
 from app.services.document_extraction.index_schema import ReportIndex
 from app.services.document_extraction.page_bundle import (
-    PageBundle, RemapReport, build_bundle, remap_tradelines,
+    PageBundle, RemapReport, build_bundle, remap_tradelines, select_pages,
 )
 from app.services.document_extraction.pipeline import run_batch_extractor
 from app.services.storage import get_storage
@@ -263,6 +263,133 @@ async def run_report_batch(
         # mutating the dict already on the row hides the update from the flush.
         report.extraction_checkpoint = {**checkpoint, "batches": banked}
         await db.commit()
+        return result
+
+
+
+async def repair_report_account(
+    report_id, batch_id: str, account_position: int, *, session_factory=None,
+    model: str = "gpt-5.6-luna", detail: str = "high",
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+) -> BatchResult:
+    """Re-read one account on only the pages the Stage-1 index assigned to it.
+
+    The repair is addressed by its stable position inside the current batch
+    plan rather than by consumer account data. The standard batch slot is
+    claimed while the paid read runs; banking revalidates the plan fingerprint
+    and replaces exactly one account in the already-banked batch.
+    """
+    factory = session_factory or async_session_maker
+    slot = batch_slot(batch_id)
+
+    async with factory() as db:
+        report = await lock_report(db, report_id)
+        if not report.storage_key:
+            raise LookupError(f"report {report_id} has no stored original")
+        index = banked_index(report)
+        plan = next((p for p in batch_plans(report) if p.batch_id == batch_id), None)
+        if plan is None:
+            raise LookupError(f"no batch {batch_id!r}")
+        if account_position < 0 or account_position >= plan.size:
+            raise LookupError(
+                f"account position {account_position} is outside {batch_id} (size {plan.size})"
+            )
+
+        target = plan.tradelines[account_position]
+        total_pages = index.total_pages or max(target.source_pages or [0])
+        pages, padding = select_pages(
+            (target.source_pages,), total_pages=total_pages, context_pages=0
+        )
+        focused = BatchPlan(
+            batch_id=f"{batch_id}:repair", ordinal=plan.ordinal,
+            tradelines=(target,), pages=pages, padding=padding,
+        )
+
+        checkpoint = dict(report.extraction_checkpoint or {})
+        banked = dict(checkpoint.get("batches") or {})
+        existing = banked.get(batch_id)
+        if not existing or not _entry_matches(existing, plan):
+            raise ValueError(f"{batch_id} is not a current banked batch and cannot be repaired")
+        try:
+            report.extraction_checkpoint = take_claim(
+                checkpoint, slot, fingerprint=plan_fingerprint(plan),
+                lease_seconds=lease_seconds,
+            )
+        except SlotAlreadyRunning:
+            raise BatchAlreadyRunning(
+                f"batch {batch_id} of report {report_id} is already being worked on"
+            ) from None
+        storage_key = report.storage_key
+        user_id = report.user_id
+        original_fingerprint = plan_fingerprint(plan)
+        await db.commit()
+
+    try:
+        document = await get_storage().get(storage_key)
+        result = await extract_batch(
+            document, focused, model=model, detail=detail,
+            context={
+                "user_id": str(user_id), "report_id": str(report_id),
+                "stage": "targeted_repair", "parent_batch": batch_id,
+            },
+        )
+    except BaseException:
+        await release(factory, report_id, slot)
+        raise
+
+    if result.batch is None or not result.quality.ok or len(result.accounts) != 1:
+        await release(factory, report_id, slot)
+        return result
+
+    replacement = result.accounts[0]
+
+    async with factory() as db:
+        report = await lock_report(db, report_id)
+        checkpoint = drop_claim(dict(report.extraction_checkpoint or {}), slot)
+        current_plan = next(
+            (p for p in batch_plans(report) if p.batch_id == batch_id), None
+        )
+        if current_plan is None or plan_fingerprint(current_plan) != original_fingerprint:
+            report.extraction_checkpoint = checkpoint
+            await db.commit()
+            raise ValueError("the batch plan changed while the targeted repair was running")
+
+        banked = dict(checkpoint.get("batches") or {})
+        entry = banked.get(batch_id)
+        if not entry or not _entry_matches(entry, current_plan):
+            report.extraction_checkpoint = checkpoint
+            await db.commit()
+            raise ValueError("the banked batch changed while the targeted repair was running")
+
+        stored = TradelineBatch.model_validate(entry["batch"])
+        accounts = list(stored.accounts)
+        if len(accounts) != current_plan.size:
+            report.extraction_checkpoint = checkpoint
+            await db.commit()
+            raise ValueError("the banked batch account count changed during repair")
+
+        accounts[account_position] = replacement
+        updated = TradelineBatch(
+            accounts=accounts,
+            missing_tradelines=list(stored.missing_tradelines or []),
+            unreadable_pages=list(stored.unreadable_pages or []),
+        )
+        repairs = list(entry.get("repairs") or [])
+        repairs.append({
+            "account_position": account_position,
+            "model": result.model,
+            "pages": list(focused.pages),
+            "repaired_at": datetime.now(timezone.utc).isoformat(),
+        })
+        banked[batch_id] = {
+            **entry,
+            "batch": updated.model_dump(mode="json"),
+            "repairs": repairs,
+            "repaired_at": datetime.now(timezone.utc).isoformat(),
+        }
+        report.extraction_checkpoint = {**checkpoint, "batches": banked}
+        await db.commit()
+        result.banked = True
         return result
 
 
