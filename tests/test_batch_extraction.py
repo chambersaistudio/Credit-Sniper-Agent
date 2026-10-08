@@ -748,3 +748,23 @@ def test_field_misses_stay_capped_so_one_bad_account_cannot_flood_the_report():
     assert len(tally.to_dict()["misses"]) == 25
     assert len(tally.to_dict(max_misses=None)["misses"]) == 40
 
+
+
+# ── Prompt regressions from live multi-year-grid benchmarks ─────────────
+
+def test_batch_prompt_pins_payment_cells_to_visible_year_month_intersections():
+    from app.services.document_extraction.pipeline import BATCH_SYSTEM
+
+    assert "2-D table" in BATCH_SYSTEM
+    assert "geometric intersection" in BATCH_SYSTEM
+    assert "EVERY visible year/month cell" in BATCH_SYSTEM
+    assert "Never propagate a status from an adjacent month/year" in BATCH_SYSTEM
+    assert "A legend may explain a symbol" in BATCH_SYSTEM
+
+
+def test_batch_prompt_requires_trailing_account_comments_and_dispute_notations():
+    from app.services.document_extraction.pipeline import BATCH_SYSTEM
+
+    assert "Contact info and Comments/Remarks block" in BATCH_SYSTEM
+    assert "Copy every account-level comment" in BATCH_SYSTEM
+    assert "consumer_dispute" in BATCH_SYSTEM

@@ -43,7 +43,11 @@ class PaymentHistoryEntry(BaseModel):
 
     year: int
     month: int = Field(description="1-12")
-    raw_status_code: str = Field(description="The code exactly as printed, e.g. 'OK', '30', 'CO', 'ND'")
+    raw_status_code: str = Field(
+        description="The literal code/symbol in this exact year-month cell, e.g. '#', '-', 'OK', '30', "
+                    "'CO', 'ND', 'CLS'. Identify the cell from the visible year/month headers; never infer "
+                    "or copy a neighboring cell, and never replace a literal symbol with its legend meaning."
+    )
     status_code: str | None = Field(description="Normalized code if obvious, else null")
     balance: str | None = Field(description="Balance reported for this month, as printed")
     past_due: str | None = Field(description="Past-due amount reported for this month, as printed")
@@ -105,8 +109,15 @@ class ExtractedTradeline(BaseModel):
                     "If the report only shows 'Balance updated', leave this null."
     )
     date_last_payment: str | None
-    remarks: str | None = Field(description="Remarks/comments printed for this account")
-    consumer_dispute: str | None = Field(description="Consumer dispute notation, if the report shows one")
+    remarks: str | None = Field(
+        description="All account-level Remarks/Comments text exactly as printed, including a Comments block "
+                    "that appears after contact information. Preserve every substantive line rather than "
+                    "dropping trailing comments."
+    )
+    consumer_dispute: str | None = Field(
+        description="Consumer dispute notation, if the report shows one. A dispute comment should also remain "
+                    "present in remarks when it is printed in the account's Comments/Remarks block."
+    )
     contact: ContactInfo | None = Field(description="Furnisher/collector contact details when printed")
     payment_history: list[PaymentHistoryEntry]
     source_pages: list[int] = Field(description="1-based pages this tradeline was read from")

@@ -387,7 +387,9 @@ Never infer, calculate, or carry a value over from another account.
 collection. If the report also names an original creditor, that goes in `original_creditor`, never in \
 `creditor_name`.
 - Copy money and dates exactly as printed (for example "$1,204" and "Feb 15, 2026"). Do not convert them.
-- Transcribe the month-by-month payment grid cell by cell, keeping each code exactly as printed.
+- Treat every month-by-month payment history as a 2-D table, not a sentence or timeline to infer. First identify the visible year axis and month axis, then map each cell by their geometric intersection. If years are rows and Jan-Dec are columns, keep the year fixed while reading that entire row left-to-right; if the document uses the opposite orientation, follow the visible headers.
+- Emit one `payment_history` entry for EVERY visible year/month cell in the requested account's grid. Preserve the literal cell exactly: '#', '-', 'ND', 'CLS', 'C', 'CO', 'VS', '30', '60', '90', '120', '150', '180', and similar codes are distinct. A legend may explain a symbol, but do not replace the printed `raw_status_code` with its meaning.
+- Never propagate a status from an adjacent month/year, never infer a transition, and never shift late/charge-off codes into neighboring cells. Re-check each year's first and last non-current cell against the visible grid before returning.
 - Keep these distinct concepts in their own fields, never merged:
   * `balance_updated` is the "Balance updated" date. `date_last_reported` is only for a field the report \
 actually labels "Last reported"/"Date reported". If only "Balance updated" is printed, leave \
@@ -399,6 +401,7 @@ agreed" describes how it is being PAID and says nothing about whether it is open
 - A tradeline you were asked for that is not on these pages goes in `missing_tradelines`. Do not invent \
 an entry for it, and do not substitute a different account.
 - Do not report any tradeline you were NOT asked for, even if it appears on these pages.
+- Read the entire requested account section through its Contact info and Comments/Remarks block. Copy every account-level comment into `remarks` exactly as printed. If a comment is a consumer-dispute notation, also put that notation in `consumer_dispute`; do not drop it merely because it appears after contact information.
 - For each account record the pages you read it from, a short excerpt proving its identity, and short \
 excerpts for the important fields."""
 
