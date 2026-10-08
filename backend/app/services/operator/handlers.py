@@ -18,7 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.credit_report import CreditReport
 from app.models.operator_job import OperatorJob
-from app.services.batch_job import batch_plans, extract_batch, run_report_batch
+from app.services.batch_job import (
+    batch_plans, extract_batch, repair_report_account, run_report_batch,
+)
 from app.services.benchmark.batch_scoring import score_batch
 from app.services.index_job import index_report
 from app.services.extraction_jobs import Stage, process_report
@@ -66,6 +68,28 @@ async def bank_batch(db: AsyncSession, job: OperatorJob, request: dict) -> dict[
     if not result.quality.ok:
         raise ValueError("; ".join(result.quality.reasons))
     return result.to_dict()
+
+
+@handler("repair_account")
+async def repair_account(db: AsyncSession, job: OperatorJob, request: dict) -> dict[str, Any]:
+    result = await repair_report_account(
+        request["report_id"], request["batch_id"], request["account_position"],
+        model="gpt-5.6-luna", detail="high",
+    )
+    if result.batch is None:
+        raise _failure_as_exception(result.failure)
+    if not result.quality.ok:
+        raise ValueError("; ".join(result.quality.reasons))
+    return {
+        "report_id": request["report_id"],
+        "batch_id": request["batch_id"],
+        "account_position": request["account_position"],
+        "model": result.model,
+        "pages": list(result.plan.pages),
+        "quality": result.quality.to_dict(),
+        "banked": result.banked,
+        "repaired": True,
+    }
 
 
 _AUDIT_CHECKPOINT_KEYS = (
