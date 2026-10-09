@@ -47,7 +47,9 @@ collection. If the report also names an original creditor, that goes in `origina
 actually labels "Last reported"/"Date reported". If only "Balance updated" is printed, leave \
 `date_last_reported` null.
   * `payment_status` is the account's own payment standing. A page or section label such as "Potentially \
-negative" or "Exceptional payment history" is a `report_classification`, not a payment status or account status.
+negative" or "Exceptional payment history" is a `report_classification`, not a payment status or account status. \
+If the printed raw status itself explicitly contains a payment-standing phrase (for example "Never late" in \
+"Paid, Closed/Never late."), copy that explicit phrase into `payment_status` rather than leaving it null.
   * For inquiries, `inquiry_type` is hard/soft and ONLY when the document says which — an inquiry being \
 listed is not evidence that it is hard. `inquiry_category` records why it happened, taken from the section \
 heading: TransUnion's "Promotional Inquiries" and "Account Review Inquiries" sections are `promotional` and \

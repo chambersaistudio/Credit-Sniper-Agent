@@ -281,6 +281,49 @@ def test_a_complete_batch_passes():
     assert quality.matched == quality.asked == 4
 
 
+
+def test_payment_history_page_must_belong_to_that_indexed_tradeline():
+    """A context page is visible to the model but is not valid provenance for
+    a payment grid belonging to the neighboring account."""
+    plan = plan_batches(golden_index())[0]
+    bundle = build_bundle(_pdf(31), plan.pages, padding=plan.padding)
+    batch = _batch_for(plan, bundle)
+    key = next(iter({identity_key(t): t for t in plan.tradelines}))
+    indexed = {identity_key(t): t for t in plan.tradelines}
+    account = batch.accounts[0]
+    expected_pages = set(indexed[key].source_pages)
+    wrong_page = next(p for p in bundle.pages if p not in expected_pages)
+    account.payment_history = [
+        PaymentHistoryEntry(
+            year=2026, month=1, raw_status_code="#", status_code="current",
+            balance=None, past_due=None, amount_paid=None, amount_due=None,
+            remarks=[], source_page=wrong_page,
+        )
+    ]
+
+    quality = assess_batch(batch, plan, bundle)
+
+    assert not quality.ok
+    assert quality.payment_pages_outside_index
+    miss = quality.payment_pages_outside_index[0]
+    assert miss["page"] == wrong_page
+    assert miss["account"] == account.creditor_name
+
+
+def test_explicit_never_late_status_cannot_disappear_from_payment_status():
+    plan = plan_batches(golden_index())[0]
+    bundle = build_bundle(_pdf(31), plan.pages, padding=plan.padding)
+    batch = _batch_for(plan, bundle)
+    account = batch.accounts[0]
+    account.status_raw = "Paid, Closed/Never late."
+    account.payment_status = None
+
+    quality = assess_batch(batch, plan, bundle)
+
+    assert not quality.ok
+    assert any("payment_status omitted" in reason for reason in quality.semantic_omissions)
+
+
 def test_a_batch_that_skips_a_tradeline_fails():
     plan = plan_batches(golden_index())[0]
     bundle = build_bundle(_pdf(31), plan.pages, padding=plan.padding)
@@ -760,6 +803,7 @@ def test_batch_prompt_pins_payment_cells_to_visible_year_month_intersections():
     assert "EVERY visible year/month cell" in BATCH_SYSTEM
     assert "Never propagate a status from an adjacent month/year" in BATCH_SYSTEM
     assert "A legend may explain a symbol" in BATCH_SYSTEM
+    assert "copy that explicit phrase into `payment_status`" in BATCH_SYSTEM
 
 
 def test_batch_prompt_requires_trailing_account_comments_and_dispute_notations():

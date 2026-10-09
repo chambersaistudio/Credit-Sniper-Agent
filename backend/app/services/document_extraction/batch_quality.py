@@ -113,6 +113,8 @@ class BatchQuality:
     unexpected: list[str] = field(default_factory=list)
     without_pages: list[str] = field(default_factory=list)
     pages_outside_bundle: list[int] = field(default_factory=list)
+    payment_pages_outside_index: list[dict[str, Any]] = field(default_factory=list)
+    semantic_omissions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +122,8 @@ class BatchQuality:
             "matched": self.matched, "reasons": self.reasons, "missing": self.missing,
             "unexpected": self.unexpected, "without_pages": self.without_pages,
             "pages_outside_bundle": self.pages_outside_bundle,
+            "payment_pages_outside_index": self.payment_pages_outside_index,
+            "semantic_omissions": self.semantic_omissions,
         }
 
 
@@ -148,6 +152,38 @@ def assess_batch(batch, plan, bundle, remap: RemapReport | None = None) -> Batch
     outside = [p for a in returned_keys.values() for p in (a.source_pages or [])
                if p not in bundle.pages]
 
+    # Payment-history provenance has to point at a page the Stage-1 index
+    # assigned to THIS tradeline, not merely any context page the batch saw.
+    # A live Experian read put every SELF FINANCIAL month on adjacent page 10
+    # while the account/grid actually lives on page 11; the old gate accepted
+    # it because page 10 was valid bundle padding.
+    indexed = {identity_key(t): t for t in plan.tradelines}
+    payment_pages_outside_index: list[dict[str, Any]] = []
+    semantic_omissions: list[str] = []
+    for key, account in returned_keys.items():
+        entry = indexed.get(key)
+        allowed_pages = set((entry.source_pages if entry else None) or [])
+        if allowed_pages:
+            for cell in account.payment_history or []:
+                if cell.source_page is not None and cell.source_page not in allowed_pages:
+                    payment_pages_outside_index.append({
+                        "account": account.creditor_name,
+                        "year": cell.year,
+                        "month": cell.month,
+                        "page": cell.source_page,
+                        "allowed_pages": sorted(allowed_pages),
+                    })
+
+        # If the document's own raw status literally includes a payment
+        # standing, dropping that standing into null loses information even
+        # though status_raw survived. This is source-preservation, not an
+        # inference: the words are already present verbatim in status_raw.
+        if "never late" in _norm(account.status_raw) and "never late" not in _norm(account.payment_status):
+            semantic_omissions.append(
+                f"{account.creditor_name}: status_raw explicitly says 'Never late' "
+                "but payment_status omitted it."
+            )
+
     if missing:
         reasons.append(f"Batch did not return: {', '.join(sorted(set(missing)))}.")
     if unexpected:
@@ -166,6 +202,13 @@ def assess_batch(batch, plan, bundle, remap: RemapReport | None = None) -> Batch
         reasons.append(
             f"Page references outside the supplied pages: {sorted(set(outside))}."
         )
+    if payment_pages_outside_index:
+        reasons.append(
+            f"{len(payment_pages_outside_index)} payment-history cell(s) cite page(s) "
+            "outside that tradeline's indexed source pages."
+        )
+    if semantic_omissions:
+        reasons.extend(semantic_omissions)
     if remap and remap.out_of_range:
         reasons.append(
             f"Model reported page numbers this bundle does not have: "
@@ -185,4 +228,6 @@ def assess_batch(batch, plan, bundle, remap: RemapReport | None = None) -> Batch
         unexpected=sorted(set(unexpected)),
         without_pages=without_pages,
         pages_outside_bundle=sorted(set(outside)),
+        payment_pages_outside_index=payment_pages_outside_index,
+        semantic_omissions=semantic_omissions,
     )
