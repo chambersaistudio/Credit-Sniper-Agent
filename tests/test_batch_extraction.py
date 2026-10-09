@@ -288,10 +288,8 @@ def test_payment_history_page_must_belong_to_that_indexed_tradeline():
     plan = plan_batches(golden_index())[0]
     bundle = build_bundle(_pdf(31), plan.pages, padding=plan.padding)
     batch = _batch_for(plan, bundle)
-    key = next(iter({identity_key(t): t for t in plan.tradelines}))
-    indexed = {identity_key(t): t for t in plan.tradelines}
     account = batch.accounts[0]
-    expected_pages = set(indexed[key].source_pages)
+    expected_pages = set(plan.tradelines[0].source_pages)
     wrong_page = next(p for p in bundle.pages if p not in expected_pages)
     account.payment_history = [
         PaymentHistoryEntry(
