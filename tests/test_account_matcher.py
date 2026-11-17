@@ -189,3 +189,15 @@ def test_conflicting_payment_fingerprint_weakens_a_match():
     b = {"creditor_name": "ATLAS", "account_type": "Line of Credit",
          "payment_history": [{"year": 2025, "month": m, "raw_status_code": "CO"} for m in range(1, 7)]}
     assert score_match(a, b).matched_fields["payment_fingerprint"] == 0.0
+
+
+def test_equal_canonical_candidates_are_reviewed_not_arbitrarily_merged():
+    import uuid
+    from app.services.account_matcher import Candidate, LinkedRecord, choose_candidate
+
+    candidates = [Candidate(uuid.uuid4(), [LinkedRecord('experian', uuid.uuid4(), dict(EXPERIAN_CAP_ONE))])
+                  for _ in range(2)]
+    for ordered in (candidates, list(reversed(candidates))):
+        chosen, result = choose_candidate(EXPERIAN_CAP_ONE, 'equifax', uuid.uuid4(), ordered)
+        assert chosen is None and result.needs_review
+        assert result.blocked_by == 'ambiguous_candidates'

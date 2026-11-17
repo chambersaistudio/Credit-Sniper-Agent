@@ -49,8 +49,8 @@ def _account(name, number, page):
         balance="$0", past_due_amount=None, high_balance=None, credit_limit="$500",
         original_amount=None, monthly_payment=None, terms=None, responsibility="Individual",
         consumer_dispute=None, date_opened="Jan 01, 2024", date_closed=None,
-        date_of_first_delinquency=None, date_last_reported=None, date_last_payment=None,
-        date_last_active=None, date_status_updated=None, balance_updated=None,
+        date_first_delinquency=None, date_last_reported=None, date_last_payment=None,
+        status_updated=None, balance_updated=None, identity_evidence=name,
         remarks=None, contact=None, payment_history=[], source_pages=[page],
         field_evidence=[],
     )
@@ -58,10 +58,11 @@ def _account(name, number, page):
 
 def _checkpoint():
     index = _index()
-    plans = plan_batches(index, batch_size=1, context_pages=0)
+    plans = plan_batches(index)
     batches = {}
-    for plan, account in zip(plans, [_account("ALPHA", "1111XX", 3), _account("BETA", "2222XX", 4)]):
-        batch = TradelineBatch(accounts=[account], missing_tradelines=[], unreadable_pages=[])
+    for plan in plans:
+        batch = TradelineBatch(accounts=[_account(t.creditor_name, t.account_number, t.source_pages[0])
+                                         for t in plan.tradelines], missing_tradelines=[], unreadable_pages=[])
         batches[plan.batch_id] = {
             "batch": batch.model_dump(mode="json"),
             "model": "gpt-5.6-luna",
@@ -85,7 +86,7 @@ def test_stage3_merge_builds_the_existing_full_extraction_shape():
 
 def test_stage3_refuses_a_missing_batch():
     checkpoint = _checkpoint()
-    checkpoint["batches"].pop("b1")
+    checkpoint["batches"].pop("b0")
     with pytest.raises(ScaledMergeError, match="missing banked batch"):
         merge_scaled_checkpoint(checkpoint)
 
@@ -95,3 +96,28 @@ def test_stage3_refuses_a_batch_from_a_stale_index_plan():
     checkpoint["batches"]["b0"]["plan_fingerprint"] = "stale"
     with pytest.raises(ScaledMergeError, match="different index plan"):
         merge_scaled_checkpoint(checkpoint)
+
+
+@pytest.mark.parametrize('bureau', ['equifax', 'transunion', 'experian'])
+def test_scaled_merge_preserves_bureau_and_raw_month_data(bureau):
+    """Contract test only; this does not certify a real bureau report."""
+    from app.services.document_extraction.mapping import account_row
+    from app.services.document_extraction.schema import PaymentHistoryEntry
+
+    checkpoint = _checkpoint()
+    checkpoint['index']['bureau'] = bureau
+    for banked in checkpoint['batches'].values():
+        for account in banked['batch']['accounts']:
+            account['payment_history'] = [PaymentHistoryEntry(
+                year=2026, month=1, raw_status_code='30', status_code=None,
+                balance='$1,234.50', past_due='$25', amount_paid='$10', amount_due='$35',
+                remarks=['Synthetic monthly remark'], source_page=account['source_pages'][0],
+            ).model_dump()]
+    extraction = merge_scaled_checkpoint(checkpoint)
+    assert extraction.bureau == bureau
+    mapped = account_row(extraction.accounts[0])
+    cell, = mapped['payment_history']
+    assert cell['balance'] == '$1,234.50'
+    assert cell['past_due'] == '$25' and cell['amount_paid'] == '$10'
+    assert cell['amount_due'] == '$35' and cell['raw_status_code'] == '30'
+    assert cell['source_page'] == 3 and cell['remarks'] == ['Synthetic monthly remark']

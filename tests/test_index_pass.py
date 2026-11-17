@@ -88,7 +88,7 @@ def test_the_indexer_prompt_forbids_transcription():
     from app.services.document_extraction.pipeline import INDEXER_SYSTEM
 
     lowered = INDEXER_SYSTEM.lower()
-    assert "do not return balances" in lowered
+    assert "do not return tradeline balances" in lowered
     assert "source_pages` is required" in INDEXER_SYSTEM
     # The two ways an index silently loses accounts.
     assert "exactly once" in lowered

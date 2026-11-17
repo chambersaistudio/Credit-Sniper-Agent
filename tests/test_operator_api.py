@@ -212,7 +212,7 @@ async def test_the_operator_surface_exposes_no_general_purpose_capability(client
         "/api/operator/operations", headers=AGENT_HEADERS)).json()}
     assert listed == set(OPERATIONS)
     assert listed == {
-        "index_report", "bank_batch", "merge_scaled_report", "finalize_scaled_report",
+        "index_report", "bank_batch", "repair_account", "merge_scaled_report", "finalize_scaled_report",
         "benchmark_batch", "draft_truth_batch", "diagnose_report",
         "inspect_checkpoint", "batch_plan", "extraction_status",
     }

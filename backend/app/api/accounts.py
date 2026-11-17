@@ -20,6 +20,7 @@ from app.services.case_service import save_evaluation
 from app.services.credit_profile import AccountView, load_account, load_profile, view_to_dict
 from app.services.document_extraction import ExtractionStatus
 from app.services.extraction_quality import record_is_disputable
+from app.services.evidence_graph import build_evidence_graph, relationships_for
 from app.services.legal_references import REFERENCES
 from app.services.reasoning_engine import ClaimProposal, evaluate_account
 from app.services.redaction import Identity
@@ -135,6 +136,13 @@ async def _owned_account(db: AsyncSession, account_id: str, user_id: uuid.UUID) 
     return view
 
 
+@router.get("/evidence-graph", response_model=dict[str, Any])
+async def evidence_graph(
+    user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
+):
+    return build_evidence_graph(await load_profile(db, user_id))
+
+
 @router.get("/{account_id}", response_model=dict[str, Any])
 async def get_account(
     account_id: str, user_id: uuid.UUID = Depends(current_user_id), db: AsyncSession = Depends(get_db)
@@ -146,6 +154,9 @@ async def get_account(
     )).scalars().all()
     return {
         **view_to_dict(view),
+        "relationships": relationships_for(
+            build_evidence_graph(await load_profile(db, user_id)), str(view.canonical.id)
+        ),
         "evaluation": claim_to_dict(claims[view.canonical.id]) if view.canonical.id in claims else None,
         "cases": [
             {"id": str(c.id), "status": c.status, "recipient_type": c.recipient_type, "recipient_name": c.recipient_name}

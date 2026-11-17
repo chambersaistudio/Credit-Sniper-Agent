@@ -19,6 +19,7 @@ No network, no provider spend.
 from io import BytesIO
 
 import pytest
+import re
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
@@ -467,12 +468,23 @@ class BatchProvider:
         if self.error:
             raise self.error
         assert output_type is TradelineBatch
-        # Answer for whatever the manifest asked for, reading bundle page 1.
+        # Locate each synthetic fixture account on its indexed page. The
+        # provenance gate correctly rejects pinning every grid to page 1.
+        positions = {
+            int(re.search(r"ORIGINAL PAGE (\d+)", _page_text(document, position)).group(1)): position
+            for position in range(1, page_count(document) + 1)
+        }
         accounts = []
         for name, original, number in _parse_manifest(prompt):
             if name in self.drop:
                 continue
-            account = _tradeline(pages=[1], evidence_pages=[1], history_pages=[1])
+            indexed_page = next((pages[0] for n, o, num, pages in GOLDEN_INDEX
+                                 if (n, o, num) == (name, original, number)), None)
+            synthetic = re.fullmatch(r"TRADELINE (\d+)", name)
+            if indexed_page is None and synthetic:
+                indexed_page = int(synthetic.group(1)) + 2
+            page = positions.get(indexed_page, 1)
+            account = _tradeline(pages=[page], evidence_pages=[page], history_pages=[page])
             account.creditor_name = name
             account.original_creditor = None if self.lose_identity else original
             account.account_number = None if self.lose_identity else number

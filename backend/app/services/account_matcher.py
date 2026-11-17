@@ -33,6 +33,9 @@ AUTO_LINK_THRESHOLD = 0.72
 # gets its own canonical account AND a recorded review suggestion. Ambiguity
 # is surfaced, never silently merged.
 REVIEW_THRESHOLD = 0.45
+# Near-equal canonical candidates are an identity ambiguity, not a reason to
+# pick whichever database row happened to arrive first.
+AMBIGUITY_MARGIN = 0.05
 # How much signal weight must be comparable before a score can reach its face
 # value. Below this the confidence is scaled down: agreeing on a name alone is
 # not the same as agreeing on a name, a number, a type and a date.
@@ -240,16 +243,27 @@ def choose_candidate(
     Returns the candidate only when the score clears the auto-link threshold.
     A near miss still comes back in the MatchResult so the caller can record a
     review suggestion instead of merging."""
-    best: Candidate | None = None
-    best_result = MatchResult(0.0)
+    ranked: list[tuple[Candidate, MatchResult]] = []
     for candidate in candidates:
         if candidate.occupied_by(bureau, report_id):
             continue
+        best_result = MatchResult(0.0)
         for other in candidate.records:
             result = score_match(record, other.fields)
             if result.confidence > best_result.confidence:
-                best, best_result = candidate, result
-    if best is None or not best_result.auto:
+                best_result = result
+        ranked.append((candidate, best_result))
+    ranked.sort(key=lambda pair: pair[1].confidence, reverse=True)
+    if not ranked:
+        return None, MatchResult(0.0)
+    best, best_result = ranked[0]
+    if (best_result.auto and len(ranked) > 1
+            and best_result.confidence - ranked[1][1].confidence < AMBIGUITY_MARGIN):
+        return None, MatchResult(
+            AUTO_LINK_THRESHOLD - 0.01, best_result.matched_fields,
+            blocked_by="ambiguous_candidates",
+        )
+    if not best_result.auto:
         return None, best_result
     return best, best_result
 
@@ -303,18 +317,18 @@ async def link_accounts(db: AsyncSession, user_id: uuid.UUID, accounts: list[Cre
             # confirm or reject the merge later.
             review = None
             if match.needs_review:
-                near = next(
-                    (c for c in candidates
-                     if not c.occupied_by(account.bureau, account.report_id)
-                     and any(score_match(fields, o.fields).confidence == match.confidence for o in c.records)),
-                    None,
-                )
+                eligible = [c for c in candidates
+                            if not c.occupied_by(account.bureau, account.report_id)]
+                near = max(eligible, key=lambda c: max(
+                    (score_match(fields, o.fields).confidence for o in c.records), default=0.0
+                ), default=None)
                 if near is not None:
                     review = {
                         "candidate_canonical_id": str(near.canonical_id),
                         "confidence": match.confidence,
                         "matched_fields": match.matched_fields,
                         "reason": "Looks like the same account, but not confidently enough to merge.",
+                        "blocked_by": match.blocked_by,
                     }
             canonical = CanonicalAccount(
                 user_id=user_id,

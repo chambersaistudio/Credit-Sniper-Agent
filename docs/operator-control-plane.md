@@ -24,6 +24,25 @@ command, Python, SQL, a filesystem path or an environment variable name. What
 the credential grants is the list in
 `backend/app/services/operator/registry.py` and nothing adjacent to it.
 
+## Current scaled workflow — November 17, 2026
+
+The registry now includes more than the original benchmark operation:
+
+| POST route under `/api/operator/jobs` | Operation | Cost |
+|---|---|---|
+| `/index-report` | Index one original PDF | One Luna call |
+| `/bank-batch` | Bank one planned batch | One Luna call |
+| `/repair-account` | Repair one indexed account | One Luna call |
+| `/merge-scaled-report` | Merge complete banked batches; invalidate prior audit | Free |
+| `/finalize-scaled-report` | Independent final audit and persistence | One Sol call; explicit acknowledgement |
+| `/draft-truth` | Store an unverified truth draft | One configured call |
+| `/benchmark-batch` | Score against verified truth | One configured call |
+
+See the Pydantic request types in `api/operator.py` for exact payloads. Paid
+operations are not retried automatically after interruption. Backend QA
+belongs to the developer; the owner should not enter raw truth JSON or drive
+benchmark jobs. Do not certify model drafts as independently checked truth.
+
 ## Endpoints
 
 | Method | Path | Cost | Purpose |
@@ -38,7 +57,7 @@ the credential grants is the list in
 | GET | `/api/operator/jobs/{job_id}` | free | Job state and sanitized result |
 | GET | `/api/operator/jobs?report_id=&operation=&limit=` | free | Recent jobs |
 
-Free reads answer directly. The one paid operation becomes a durable job.
+Free reads answer directly. Paid operations and scaled merge become durable jobs.
 
 ## Auth
 

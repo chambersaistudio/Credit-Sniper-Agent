@@ -90,6 +90,31 @@ export default function AccountDetail() {
             </div>
           )}
           <KeyMetrics records={data.records} />
+          {(data.relationships || []).length > 0 && (
+            <div className="card stack">
+              <div className="section-title">Related debt to review</div>
+              {data.relationships.map(relation => (
+                <div key={relation.id} className="stack">
+                  <Link to={`/accounts/${relation.related_account.id}`}>
+                    {relation.related_account.creditor_name}
+                  </Link>
+                  <span className="badge">{relation.ambiguous ? 'Multiple possible accounts' : 'Needs review'}</span>
+                  <p className="small muted">{relation.explanation}</p>
+                  {relation.supports.map((support, index) => (
+                    <div key={index} className="small muted">
+                      {support.evidence.map((source, i) => (
+                        <div key={i}>
+                          <Link to={`/reports/${source.report_id}`}>{bureauName(source.bureau)} report</Link>
+                          {' · '}{fieldLabel(source.field)}: {source.value}
+                          {source.pages.length > 0 ? ` · page ${source.pages.join(', ')}` : ' · field page unavailable'}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
           <Comparison records={data.records} />
           <BureauDetails records={data.records} />
           <PaymentHistorySection records={data.records} />

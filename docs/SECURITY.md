@@ -1,6 +1,17 @@
 # Security and sensitive-data handling
 
-Status as of Phase 1.5. Credit Sniper handles consumer financial data; this
+Reviewed against code and hosting on November 17, 2026. Live readiness
+confirmed JWT auth, R2 storage and migration `0011`; unauthenticated user and
+operator reads returned 401. This does not independently verify bucket ACLs,
+provider retention settings or database encryption configuration.
+
+The M4 evidence graph uses the authenticated owner's profile, refuses mixed
+owners, and exposes references/values only to that owner. Only verified
+records can support a debt relationship. Relationship leads do not become
+claims, approvals or mail jobs. The public repository may contain synthetic
+fixtures only, never actual consumer reports, truth sets or secrets.
+
+Historical Phase 1.5 security design follows. Credit Sniper handles consumer financial data; this
 document records what is protected, what isn't yet, and what must happen
 before the app is exposed to anyone but its owner.
 

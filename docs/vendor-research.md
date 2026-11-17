@@ -1,5 +1,19 @@
 # Vendor and tool research for later phases
 
+## Integration status — November 17, 2026
+
+PostGrid test/live variable **names** are present in Railway. Connected app
+reads withhold their values; this does not establish configured mode, valid
+credentials, provider account readiness or an implemented adapter. The current
+code has no verified electronic mailing integration. The roadmap selects
+PostGrid sandbox first; earlier provider recommendations below are research,
+not a deployment decision. Live mailing remains gated on consumer authority,
+validated addresses, approved immutable packages and confirmed provider status.
+Vendor capabilities, addresses and legal statements below must be rechecked
+against current primary sources before implementation.
+
+## Historical research
+
 Researched September 2026. Nothing here is integrated yet — Phase 1.5 built the
 foundation these plug into: recipient-independent dispute packages and a
 case state machine that records how and when each was sent. Claims marked *(vendor)* come

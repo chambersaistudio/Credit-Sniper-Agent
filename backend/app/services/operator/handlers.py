@@ -370,7 +370,8 @@ async def draft_truth_batch(db: AsyncSession, job: OperatorJob, request: dict) -
         "verified": False,
         "accounts_drafted": len(rows),
         "months_drafted": sum(len(r.get("payment_history") or {}) for r in rows),
-        "gate": result.quality.to_dict(),
+        "gate": {"ok": result.quality.ok, "asked": result.quality.asked,
+                 "returned": result.quality.returned, "matched": result.quality.matched},
         "banked_batches_unchanged": banked_before == _banked_digest(report),
     }
 

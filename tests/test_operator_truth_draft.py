@@ -22,6 +22,7 @@ No network, no provider spend.
 """
 import dataclasses
 import json
+import pytest
 import uuid
 
 
@@ -102,10 +103,11 @@ async def test_drafting_banks_nothing(client, operator_env, batch_ai):
     assert (await _job(client, queued.json()["job_id"]))["result"]["banked_batches_unchanged"]
 
 
-async def test_the_job_result_carries_counts_not_account_values(client, operator_env, batch_ai):
+@pytest.mark.parametrize("drop", [(), ("TRADELINE 4",)])
+async def test_the_job_result_carries_counts_not_account_values(client, operator_env, batch_ai, drop):
     """The values live in the truth store and are fetched only to be corrected.
     The job listing, polled every few seconds on a phone, holds none of them."""
-    batch_ai()
+    batch_ai(drop=drop)
     report_id = await _seed_report()
     queued = await _draft(client, report_id)
     await drain_operator_queue()

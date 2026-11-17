@@ -407,6 +407,7 @@ actually labels "Last reported"/"Date reported". If only "Balance updated" is pr
 `date_last_reported` null.
   * `payment_status` is the account's own payment standing. A page or section label such as "Potentially \
 negative" or "Exceptional payment history" is a `report_classification`, not a payment status or account status.
+If the raw account status includes an explicit payment-standing phrase (for example "Never late"), copy that explicit phrase into `payment_status` rather than leaving it null.
   * `open_closed` is whether the account is open or closed. A payment phrase such as "Pays account as \
 agreed" describes how it is being PAID and says nothing about whether it is open — never use one for the other.
 - A tradeline you were asked for that is not on these pages goes in `missing_tradelines`. Do not invent \

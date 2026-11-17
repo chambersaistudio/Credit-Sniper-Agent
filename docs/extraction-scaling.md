@@ -1,8 +1,30 @@
 # Scaling document extraction beyond one pass
 
-**Status: Stage 1 validated in production. Stage 2 implemented and awaiting
-its first real batch. Stage 3 (merge) remains a proposal.** Written after the Experian failure
-diagnosed in `scripts/diagnose_report.py`.
+## Current status — November 17, 2026
+
+Stages 1–4 are implemented: index, bank individual batches, deterministic
+merge, independent final audit and persistence. Targeted single-account
+repair is implemented. Operator HTTP routes expose all these operations.
+The consumer upload worker still uses full-report extraction; scaled
+extraction is an operator-controlled path, not the default upload path.
+
+The October 8 M3 completion in Slack records verification of the exact
+28-page Experian benchmark: 15 accounts, 2 inquiries, 0 public records;
+no final field/payment/provenance misses and a clean independent audit.
+This is historical benchmark evidence, not a fresh re-read on November 17.
+Equifax and TransUnion production-scaled validation remains M4 work.
+Synthetic cross-bureau contract tests do not establish real extraction quality.
+
+`scaled_merge.py` refuses missing/stale batches, failed quality gates and
+duplicates. Merge leaves NEEDS_AUDIT; `finalize_scaled_report` alone invokes
+the independent auditor/reconciliation path. A clean deterministic merge
+must never be described as verified extraction.
+
+## Original design rationale (historical)
+
+The remainder documents the original constraints and sequencing. Statements
+that Stage 2 awaits its first batch or Stage 3 is proposed are superseded by
+the current status above.
 
 The failure is confirmed from production: two Sol attempts, both
 `AIResponseError` — `Invalid JSON: EOF while parsing a string` at columns

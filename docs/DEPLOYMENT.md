@@ -1,6 +1,26 @@
-# Staging deployment: Vercel (frontend) → Railway (API + Postgres) → Cloudflare R2
+# Deployment: Vercel (frontend) → Railway (API + Postgres) → Cloudflare R2
 
-**This is staging / personal-test infrastructure, not production.**
+## Verified November 17, 2026 checkpoint
+
+The hosting providers call this environment **production**, but the release
+remains for owner-only testing, not outside consumers. Active branch:
+`claude/credit-dispute-agent-u0yyq3`. GitHub default
+`claude/credit-dispute-agent-8vaya` is older; do not base new work on it.
+
+At takeover, branch head was `7df676b` (fixture-only change), while both
+Railway SUCCESS and Vercel READY production deployments served `178572a`.
+Live `/api/health/ready` returned database `ok`, schema `0011`, storage `r2`,
+auth `jwt`; unauthenticated user and operator requests returned 401.
+Railway API and Postgres were online with no pending changes or warnings.
+Clerk sign-in rendered in the live frontend, using Clerk development mode.
+
+No new migration is required for the first M4 graph/matching changes. The
+repository migration head is `0011`; use that revision in the checklist below.
+See `docs/M4.md` for scope, evidence gates and remaining validation.
+
+## Setup reference
+
+**This is owner-only test infrastructure.**
 Authentication is now enforced (Clerk-issued JWTs, verified server-side) and
 every record is scoped to its owner, so the app is safe for the owner to test
 with their own reports **once `AUTH_MODE=jwt` is set and verified**. It is not
@@ -216,7 +236,7 @@ Or check by hand:
 
 1. `https://<railway-domain>/api/health` → `{"status":"ok",…}`: the process is up.
 2. `https://<railway-domain>/api/health/ready` → `"database":"ok"`,
-   `"schema_revision":"0003"`, `"storage_backend"`, `"ai_configured":true`,
+   `"schema_revision":"0011"`, `"storage_backend"`, `"ai_configured":true`,
    **`"auth_mode":"jwt"`**. A 503 means `DATABASE_URL`/migrations are wrong.
    If `auth_mode` is `disabled`, stop — the deployment is unprotected.
 3. `curl https://<railway-domain>/api/users/me` with no token → **401**. This
@@ -237,7 +257,7 @@ Or check by hand:
 Do all of these against the **hosted** deployment (or use the local option
 below):
 
-- [ ] `GET /api/health/ready` shows `"auth_mode":"jwt"` and `"schema_revision":"0003"`.
+- [ ] `GET /api/health/ready` shows `"auth_mode":"jwt"` and `"schema_revision":"0011"`.
 - [ ] `GET /api/users/me` with no token returns **401**.
 - [ ] The Vercel URL shows Clerk sign-in before any data screen.
 - [ ] You can sign in, and Home loads over HTTPS (lock icon in Safari).

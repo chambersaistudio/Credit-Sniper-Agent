@@ -86,7 +86,7 @@ async def client(db_ready, jwt_env, ai):
         yield c
 
 
-PROTECTED_GETS = ["/api/dashboard", "/api/activity", "/api/reports/", "/api/accounts/", "/api/cases/", "/api/users/me"]
+PROTECTED_GETS = ["/api/dashboard", "/api/activity", "/api/reports/", "/api/accounts/", "/api/accounts/evidence-graph", "/api/cases/", "/api/users/me"]
 
 
 async def test_unauthenticated_requests_are_rejected(client):
@@ -159,6 +159,11 @@ async def test_cross_user_access_is_denied_without_leaking_existence(client):
     await client.get("/api/users/me", headers=_headers(b))
 
     intruder = _headers(b)
+    graph = await client.get("/api/accounts/evidence-graph", headers=intruder)
+    assert graph.status_code == 200
+    assert graph.json() == {"version": "1", "nodes": [], "relationships": []}
+    owner_graph = (await client.get("/api/accounts/evidence-graph", headers=_headers(a))).json()
+    assert account['id'] in {node['id'] for node in owner_graph['nodes']}
     # Reads: another user's records look exactly like nonexistent ones (404).
     assert (await client.get(f"/api/reports/{report_id}", headers=intruder)).status_code == 404
     assert (await client.get(f"/api/reports/{report_id}/file", headers=intruder)).status_code == 404

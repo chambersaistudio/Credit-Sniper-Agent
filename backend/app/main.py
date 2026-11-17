@@ -72,7 +72,7 @@ app.add_middleware(
     allow_origins=settings.allowed_origins,
     allow_origin_regex=settings.allowed_origin_regex or None,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Admin-Token", "X-Operator-Token"],
 )
 
